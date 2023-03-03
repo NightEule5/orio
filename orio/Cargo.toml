@@ -1,0 +1,12 @@
+[package]
+name = "orio"
+version = "0.1.0"
+edition = "2021"
+authors = ["Strixpyrr"]
+description = "A memory-recycling IO library written in Rust."
+keywords = ["io"]
+license = "Apache-2.0"
+homepage = "https://github.com/NightEule5/orio/"
+repository = "https://github.com/NightEule5/orio/"
+
+[dependencies]

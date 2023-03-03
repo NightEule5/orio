@@ -22,7 +22,7 @@ The `Buffer` struct is a mutable byte buffer, containing a vector of segments. I
 use orio::{Buffer, Source, BufSource};
 
 fn main() {
-	let mut buf_a = Buffer::from("Hello world!");
+	let mut buf_a = Buffer::try_from("Hello world!").unwrap();
 	let mut buf_b = Buffer::new();
 	
 	let count: usize = buf_b.read(buf_a, 5).unwrap();

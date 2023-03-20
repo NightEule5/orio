@@ -49,7 +49,56 @@
 //! Segments can be allocated when: 1) a buffer requests one but the pool has none
 //! left, or 2) a shared segment is created then written to.
 
+#![feature(
+	thread_local,
+)]
+
 mod segment;
+mod pool;
+
+use std::error;
 pub(crate) use segment::*;
+pub use pool::*;
+
+use amplify_derive::Display;
 
 pub(crate) const DEFAULT_SEGMENT_SIZE: usize = 2048;
+
+#[derive(Copy, Clone, Debug, Display)]
+pub enum ErrorKind {
+	#[cfg(feature = "shared-pool")]
+	#[display("could not get lock, mutex was poisoned")]
+	Poison,
+	#[display("could not borrow the pool, already in use")]
+	Borrow,
+}
+
+#[derive(Debug, Display)]
+#[display("{kind}")]
+pub struct Error {
+	kind: ErrorKind,
+	source: Option<Box<dyn error::Error>>,
+}
+
+impl error::Error for Error {
+	fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+		self.source.as_deref()
+	}
+}
+
+impl Error {
+	#[cfg(feature = "shared-pool")]
+	pub(crate) fn poison(error: std::sync::PoisonError<&mut Vec<Segment>>) -> Self {
+		Self {
+			kind: ErrorKind::Poison,
+			source: Some(Box::new(error)),
+		}
+	}
+
+	pub(crate) fn borrow(error: impl error::Error + 'static) -> Self {
+		Self {
+			kind: ErrorKind::Borrow,
+			source: Some(Box::new(error)),
+		}
+	}
+}

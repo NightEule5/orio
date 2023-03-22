@@ -62,7 +62,7 @@ pub use pool::*;
 
 use amplify_derive::Display;
 
-pub(crate) const DEFAULT_SEGMENT_SIZE: usize = 2048;
+pub(crate) const DEFAULT_SEGMENT_SIZE: usize = 8 * 1024;
 
 #[derive(Copy, Clone, Debug, Display)]
 pub enum ErrorKind {

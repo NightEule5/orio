@@ -14,7 +14,7 @@
 
 use std::cmp::min;
 use std::collections::VecDeque;
-use std::ops::{Deref, DerefMut, Range};
+use std::ops::{Deref, DerefMut, IndexMut, Range};
 use std::pin::Pin;
 use std::rc::Rc;
 use crate::{DEFAULT_SEGMENT_SIZE, DefaultPool, Pool};
@@ -33,6 +33,9 @@ impl<const N: usize> Memory<N> {
 
 	/// Returns a shared copy reference to the memory.
 	fn share(&self) -> Self { self.clone() }
+
+	/// Returns true is this memory is shared between two of more segments.
+	fn is_shared(&self) -> bool { Rc::strong_count(&self.0) > 1 }
 }
 
 impl<const N: usize> Default for Memory<N> {
@@ -45,7 +48,8 @@ impl<const N: usize> From<[u8; N]> for Memory<N> {
 		Self(Rc::new(Box::pin(
 			InnerMemory {
 				data: value,
-				len: 0,
+				start: 0,
+				end: 0,
 			}
 		)))
 	}
@@ -69,29 +73,41 @@ impl<const N: usize> DerefMut for Memory<N> {
 #[derive(Copy, Clone)]
 struct InnerMemory<const N: usize> {
 	data: [u8; N],
-	len: usize,
+	start: usize,
+	end: usize,
 }
 
 impl<const N: usize> InnerMemory<N> {
 	/// Returns a slice of the data available for reading.
-	fn data(&self, pos: usize) -> &[u8] {
-		let to = pos + self.len;
-		debug_assert!((pos..to).contains(&pos));
-		&self.data[pos..to]
+	fn data(&self) -> &[u8] {
+		&self.data[self.start..self.end]
 	}
 
 	/// Returns a mutable slice of the data available for writing.
-	fn data_mut(&mut self, pos: usize) -> &mut [u8] {
-		let pos = pos + self.len;
-		debug_assert!((0..=N).contains(&pos));
-		&mut self.data[pos..]
+	fn data_mut(&mut self) -> &mut [u8] {
+		&mut self.data[self.end..]
 	}
 
-	fn len(&self) -> usize { self.len }
+	fn shift_data(&mut self) {
+		self.data.rotate_left(self.start);
+		self.end -= self.start;
+	}
 
-	fn inc_len(&mut self, n: usize) { self.len = min(self.len + n, N) }
+	fn start(&self) -> usize { self.start }
+	fn inc_start(&mut self, n: usize) {
+		debug_assert!(self.start + n <= N);
+		self.start += n;
+	}
+
+	fn end(&self) -> usize { self.end }
+	fn inc_end(&mut self, n: usize) {
+		debug_assert!(self.end + n <= N);
+		self.end += n;
+	}
+
 	fn reset(&mut self) {
-		self.len = 0;
+		self.start = 0;
+		self.end = 0;
 	}
 }
 
@@ -101,7 +117,7 @@ impl<const N: usize> InnerMemory<N> {
 /// the back and laden segments in front. To read and write, segments are pushed
 /// and popped from the ring buffer.
 pub struct Segments<const N: usize = DEFAULT_SEGMENT_SIZE> {
-	end: isize,
+	len: usize,
 	lim: usize,
 	cnt: usize,
 	ring: VecDeque<Segment<N>>,
@@ -114,7 +130,7 @@ impl<const N: usize> Default for Segments<N> {
 impl<const N: usize> Segments<N> {
 	pub fn new() -> Self {
 		Self {
-			end: -1,
+			len: 0,
 			lim: 0,
 			cnt: 0,
 			ring: VecDeque::new(),
@@ -131,13 +147,8 @@ impl<const N: usize> Segments<N> {
 	/// the last non-empty segment, empty segments are pushed to the back.
 	pub fn push(&mut self, seg: Segment<N>) {
 		if seg.is_empty() {
-			self.lim += N;
 			self.push_empty(seg);
 		} else {
-			let cur_lim = if self.end < 0 { 0 } else { self.get().lim() };
-			self.cnt += seg.len();
-			self.lim += seg.lim();
-			self.lim -= cur_lim;
 			self.push_laden(seg);
 		}
 	}
@@ -146,12 +157,16 @@ impl<const N: usize> Segments<N> {
 	/// writing.
 	pub fn pop_back(&mut self) -> Option<Segment<N>> {
 		let seg = if self.has_empty() {
-			// Faster to replace the popped segment with an fresh one from the back
+			// Faster to replace the popped segment with a fresh one from the back
 			// if possible.
-			self.ring.swap_remove_back(self.end as usize)
+			self.ring.swap_remove_back(self.len as usize)
 		} else {
 			self.ring.pop_back()
 		};
+
+		if seg.is_some() {
+			self.len -= 1;
+		}
 
 		let (len, lim) = seg.as_ref().map_or((0, 0), |seg| (seg.len(), seg.lim()));
 		self.cnt -= len;
@@ -162,9 +177,10 @@ impl<const N: usize> Segments<N> {
 
 	/// Pops the front [`Segment`] from the ring buffer. Used for reading.
 	pub fn pop_front(&mut self) -> Option<Segment<N>> {
-		let seg = self.ring.pop_front();
-		self.cnt -= seg.as_ref().map_or(0, Segment::len);
-		seg
+		let seg = self.ring.pop_front()?;
+		self.len -= 1;
+		self.cnt -= seg.len();
+		Some(seg)
 	}
 
 	/// Reserves at least `count` bytes of segments, increasing [`Self::limit`] to
@@ -175,64 +191,96 @@ impl<const N: usize> Segments<N> {
 
 	/// Recycles all empty segments.
 	pub fn trim<P: Pool<N>>(&mut self, pool: P) -> Result<(), P::Error> {
-		let range = self.empty_range();
+		let range = self.len..self.ring.len();
 		self.lim -= range.len() * N;
 		pool.recycle(self.ring.drain(range))
 	}
 
-	/// Fills partial segments to free space.
-	pub fn compress(&mut self) {
-		todo!()
-	}
+	/// Fills partial segments to free space, optionally forcing compression of
+	/// shared segments (triggering a copy).
+	/// Todo: infer the force option with the void factor.
+	pub fn compress(&mut self, force: bool) {
+		let mut dst = VecDeque::with_capacity(self.ring.len());
+		let mut empty = Vec::new();
+		let mut prev = None;
+		while let Some(mut curr) = self.pop_front()
+									   .or_else(|| prev.take()) {
+			if curr.is_empty() {
+				empty.push(curr);
+			} else if let Some(mut base) = prev.take() {
+				if force || !base.mem.is_shared() {
+					base.shift();
+					base.move_data(&mut curr);
 
-	pub fn extend_empty(&mut self, segments: impl Iterator<Item = Segment<N>>) {
-		self.ring.extend(segments);
+					if base.is_full() {
+						dst.push_back(base);
+					} else {
+						let _ = prev.insert(base);
+					}
+
+					if curr.is_empty() || prev.is_some() {
+						empty.push(curr);
+					} else {
+						let _ = prev.insert(curr);
+					}
+				} else if let Some(mut empty) = empty.pop() {
+					// Move the shared memory to an empty segment, drop it, and
+					// insert as the base.
+					empty.move_data(&mut base);
+					let _ = prev.insert(empty);
+				} else {
+					dst.push_back(base);
+					let _ = prev.insert(curr);
+				}
+			} else {
+				dst.push_back(curr);
+			}
+		}
+
+		self.len = dst.len();
+		self.lim = dst.back().map_or(0, Segment::lim) + empty.len() * N;
+		dst.extend(empty);
+		self.ring = dst;
 	}
 
 	fn get(&self) -> &Segment<N> {
-		&self.ring[self.end as usize]
+		&self.ring[self.len]
 	}
 
-	fn has_empty(&self) -> bool {
-		self.end > -1 && (self.end as usize) < self.ring.len() - 1
-	}
+	fn has_empty(&self) -> bool { self.len < self.ring.len() }
 
-	fn empty_range(&self) -> Range<usize> {
-		if self.end < 0 {
-			0..0
-		} else {
-			let len = self.ring.len();
-			let mut end = self.end as usize;
-
-			if !self.get().is_empty() {
-				end += 1;
-			}
-
-			end..len
-		}
+	fn push_front(&mut self, seg: Segment<N>) {
+		self.ring.push_front(seg);
+		self.len += 1;
 	}
 
 	fn push_empty(&mut self, seg: Segment<N>) {
+		self.lim += N;
 		self.ring.push_back(seg);
 	}
 
 	fn push_laden(&mut self, seg: Segment<N>) {
-		self.end += 1;
-		self.ring.insert(self.end as usize, seg);
+		let cur_lim = if self.len == 0 { 0 } else { self.get().lim() };
+		self.cnt += seg.len();
+		self.lim += seg.lim();
+		self.lim -= cur_lim;
+
+		self.len += 1;
+		self.ring.insert(self.len, seg);
 	}
 }
 
 /// A fixed-size buffer segment.
 pub struct Segment<const N: usize = DEFAULT_SEGMENT_SIZE> {
 	mem: Memory<N>,
-	pos: usize,
+	off: usize,
 }
 
 impl<const N: usize> Segment<N> {
 	fn new(mem: Memory<N>) -> Self {
 		Self {
 			mem,
-			pos: 0,
+			off: 0,
 		}
 	}
 
@@ -249,21 +297,50 @@ impl<const N: usize> Segment<N> {
 	pub fn is_full (&self) -> bool { self.lim() == 0 }
 
 	/// Returns a slice of the data available for reading.
-	pub fn data(&self) -> &[u8] { self.mem.data(self.pos) }
+	pub fn data(&self) -> &[u8] { &self.mem.data()[self.off..] }
 	/// Returns a mutable slice of the data available for writing.
-	pub fn data_mut(&mut self) -> &mut [u8] { self.mem.data_mut(self.pos) }
+	pub fn data_mut(&mut self) -> &mut [u8] { &mut self.mem.data_mut()[self.off..] }
 
 	/// Returns the position, from `[0,N]`.
-	pub fn pos(&self) -> usize { self.pos }
+	pub fn pos(&self) -> usize { self.mem.start() + self.off }
 	/// Returns the length, from `[0,N]`.
-	pub fn len(&self) -> usize { self.mem.len }
+	pub fn len(&self) -> usize { self.mem.end() - self.pos() }
 	/// Returns the number of bytes that can be written to this segment.
 	pub fn lim(&self) -> usize { N - (self.pos() + self.len()) }
 
 	/// Clears the segment.
 	pub fn clear(&mut self) {
 		self.mem.reset();
-		self.pos = 0;
+		self.off = 0;
+	}
+
+	/// Shifts the data back such that `pos` is 0.
+	pub fn shift(&mut self) {
+		if self.pos() == 0 { return }
+		self.mem.inc_start(self.off);
+		self.off = 0;
+		self.mem.shift_data();
+	}
+
+	/// Consumes `n` bytes after reading.
+	pub fn consume(&mut self, n: usize) {
+		debug_assert!(self.off + n <= N);
+		self.off += n;
+	}
+
+	/// Adds `n` bytes after writing.
+	pub fn add(&mut self, n: usize) {
+		self.mem.inc_end(n);
+	}
+
+	/// Moves all bytes into another segment, returning the number of bytes moved.
+	pub fn move_data(&mut self, other: &mut Self) {
+		let n = min(self.len(), other.lim());
+		let cur_data = other.data_mut();
+		let seg_data = &self.data()[..n];
+		cur_data.copy_from_slice(seg_data);
+		self.consume(n);
+		other.add(n);
 	}
 }
 

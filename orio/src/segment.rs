@@ -100,6 +100,11 @@ impl<const N: usize> Segments<N> {
 		pool.recycle(self.ring.drain(range))
 	}
 
+	/// Pushes empty segments to the back of the ring buffer.
+	pub fn extend_empty(&mut self, segments: impl IntoIterator<Item = Segment<N>>) {
+		self.ring.extend(segments);
+	}
+
 	/// Fills partial segments to free space, optionally forcing compression of
 	/// shared segments (triggering a copy).
 	/// Todo: infer the force option with the void factor.

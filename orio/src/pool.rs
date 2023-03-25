@@ -25,7 +25,7 @@ use once_cell::unsync::Lazy;
 use crate::{DEFAULT_SEGMENT_SIZE, Error, Segment, Segments};
 
 pub trait Pool<const N: usize> {
-	type Error: error::Error;
+	type Error: error::Error + 'static;
 
 	/// Claims a single segment.
 	fn claim_one(&self) -> Result<Segment<N>, Self::Error>;
@@ -70,7 +70,7 @@ cfg_if! {
 #[thread_local]
 static LOCAL_POOL: Lazy<LocalPool> = Lazy::new(|| LocalPool::default());
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LocalPool<const N: usize = DEFAULT_SEGMENT_SIZE> {
 	segments: Rc<RefCell<Vec<Segment<N>>>>
 }
@@ -137,6 +137,10 @@ impl<const N: usize> LocalPool<N> {
 
 impl LocalPool {
 	pub fn get() -> Self { LOCAL_POOL.clone() }
+}
+
+impl Default for LocalPool {
+	fn default() -> Self { Self::get() }
 }
 
 // Todo: Segment memory can't be sent between threads, won't compile. Split segments

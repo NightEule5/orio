@@ -49,17 +49,26 @@
 //! Segments can be allocated when: 1) a buffer requests one but the pool has none
 //! left, or 2) a shared segment is created then written to.
 
+#![allow(incomplete_features)]
 #![feature(
+	associated_type_defaults,
 	get_mut_unchecked,
+	return_position_impl_trait_in_trait,
+	specialization,
 	thread_local,
+	type_alias_impl_trait,
 )]
 
 mod segment;
 mod pool;
+mod buffer;
+mod buffered_wrappers;
 
 use std::error;
 pub(crate) use segment::*;
 pub use pool::*;
+pub use buffer::*;
+use buffered_wrappers::*;
 
 use amplify_derive::Display;
 
@@ -71,7 +80,19 @@ pub enum ErrorKind {
 	#[display("could not get lock, mutex was poisoned")]
 	Poison,
 	#[display("could not borrow the pool, already in use")]
-	Borrow,
+	PoolBorrow,
+	#[display("invalid operation on closed stream")]
+	Closed,
+	#[display("could not clear the buffer")]
+	BufClear,
+	#[display("buffered write from source failed")]
+	BufWrite,
+	#[display("buffered read to sink failed")]
+	BufRead,
+	#[display("buffered sink could not be flushed to inner sink")]
+	BufFlush,
+	#[display("buffered stream could not be closed")]
+	BufClose,
 }
 
 #[derive(Debug, Display)]
@@ -88,6 +109,16 @@ impl error::Error for Error {
 }
 
 impl Error {
+	fn new(
+		kind: ErrorKind,
+		source: impl error::Error + 'static
+	) -> Self {
+		Self {
+			kind,
+			source: Some(Box::new(source)),
+		}
+	}
+
 	#[cfg(feature = "shared-pool")]
 	pub(crate) fn poison(error: std::sync::PoisonError<&mut Vec<Segment>>) -> Self {
 		Self {
@@ -97,9 +128,108 @@ impl Error {
 	}
 
 	pub(crate) fn borrow(error: impl error::Error + 'static) -> Self {
+		Self::new(ErrorKind::PoolBorrow, error)
+	}
+
+	pub(crate) fn closed() -> Self {
 		Self {
-			kind: ErrorKind::Borrow,
-			source: Some(Box::new(error)),
+			kind: ErrorKind::Closed,
+			source: None
 		}
 	}
+
+	pub(crate) fn buf_clear(error: impl error::Error + 'static) -> Self {
+		Self::new(ErrorKind::BufClear, error)
+	}
+
+	pub(crate) fn buf_write(error: impl error::Error + 'static) -> Self {
+		Self::new(ErrorKind::BufWrite, error)
+	}
+
+	pub(crate) fn buf_read(error: impl error::Error + 'static) -> Self {
+		Self::new(ErrorKind::BufRead, error)
+	}
+
+	pub(crate) fn buf_flush(error: impl error::Error + 'static) -> Self {
+		Self::new(ErrorKind::BufFlush, error)
+	}
+
+	pub(crate) fn buf_close(error: impl error::Error + 'static) -> Self {
+		Self::new(ErrorKind::BufClose, error)
+	}
+}
+
+/// A data stream, either [`Source`] or [`Sink`]
+pub trait Stream {
+	type Error: error::Error + 'static = Error;
+
+	/// Closes the stream. All default streams close automatically when dropped.
+	/// Closing is idempotent, [`close`] may be called more than once with no
+	/// effect.
+	fn close(&mut self) -> Result<(), Self::Error> { Ok(()) }
+}
+
+/// A data source.
+pub trait Source: Stream {
+	/// Reads `count` bytes from the source into the buffer.
+	fn read<const N: usize>(&mut self, sink: &mut Buffer<N, impl Pool<N>>, count: usize) -> Result<usize, Self::Error>;
+
+	/// Reads all bytes from the source into the buffer.
+	#[inline]
+	fn read_all<const N: usize>(&mut self, sink: &mut Buffer<N, impl Pool<N>>) -> Result<usize, Self::Error> {
+		self.read(sink, usize::MAX)
+	}
+}
+
+pub trait SourceBuffer<const N: usize>: Source + Sized {
+	/// Wrap the source in a buffered source.
+	fn buffer<P: Pool<N> + Default>(self) -> impl BufSource<N> { buffer_source::<N, _, P>(self) }
+}
+
+impl<const N: usize, S: Source> SourceBuffer<N> for S { }
+
+/// A data sink.
+pub trait Sink: Stream {
+	/// Writes `count` bytes from the buffer into the sink.
+	fn write<const N: usize>(
+		&mut self,
+		source: &mut Buffer<N, impl Pool<N>>,
+		count: usize
+	) -> Result<usize, Self::Error>;
+
+	/// Writes all bytes from the buffer into the sink.
+	#[inline]
+	fn write_all<const N: usize>(&mut self, source: &mut Buffer<N, impl Pool<N>>) -> Result<usize, Self::Error> {
+		self.write(source, source.count())
+	}
+
+	/// Writes all buffered data to its final target.
+	fn flush(&mut self) -> Result<(), Self::Error> { Ok(()) }
+}
+
+impl<S: Sink> Stream for S {
+	/// Flushes and closes the stream. All default streams close automatically when
+	/// dropped. Closing is idempotent, [`close`] may be called more than once with
+	/// no effect.
+	default fn close(&mut self) -> Result<(), Self::Error> { self.flush() }
+}
+
+pub trait SinkBuffer<const N: usize>: Sink + Sized {
+	/// Wrap the sink in a buffered sink.
+	fn buffer<P: Pool<N> + Default>(self) -> impl BufSink<N> { buffer_sink::<N, _, P>(self) }
+}
+
+impl<const N: usize, S: Sink> SinkBuffer<N> for S { }
+
+pub trait BufStream<const N: usize = DEFAULT_SEGMENT_SIZE> {
+	type Pool: Pool<N> = DefaultPool<N>;
+	fn buf(&mut self) -> &mut Buffer<N, Self::Pool>;
+}
+
+pub trait BufSource<const N: usize = DEFAULT_SEGMENT_SIZE>: BufStream<N> + Source {
+	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize, Self::Error>;
+}
+
+pub trait BufSink<const N: usize = DEFAULT_SEGMENT_SIZE>: BufStream<N> + Sink {
+	fn write_all(&mut self, source: &mut impl Source) -> Result<usize, Self::Error>;
 }

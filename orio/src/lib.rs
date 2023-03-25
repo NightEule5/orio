@@ -50,6 +50,7 @@
 //! left, or 2) a shared segment is created then written to.
 
 #![feature(
+	get_mut_unchecked,
 	thread_local,
 )]
 

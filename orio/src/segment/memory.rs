@@ -264,10 +264,10 @@ impl<const N: usize> Memory<N> {
 	pub fn fork(&mut self) -> bool {
 		// Don't use make_mut because we're also shifting data while copying.
 		if self.is_shared() {
-			let forked = Box::pin([0; N]);
+			let mut forked = Box::pin([0; N]);
 			let data = self.data();
 			let range = ..data.len();
-			&mut forked[range].copy_from_slice(data);
+			(&mut forked[range]).copy_from_slice(data);
 
 			self.loc = range.into();
 			self.data = Rc::new(MemoryData::new(forked, self.loc));
@@ -278,53 +278,31 @@ impl<const N: usize> Memory<N> {
 		}
 	}
 
+	fn get(&mut self) -> &mut MemoryData<N> {
+		// Safety: this function is never called unless there are no strong refs to
+		// the data.
+		unsafe {
+			Rc::get_mut_unchecked(&mut self.data)
+		}
+	}
+
 	/// Returns a slice of the data available for reading.
 	pub fn data(&self) -> &[u8] { &self.data[self.loc] }
 
 	/// Returns a mutable slice of the data available for writing, forking it if
 	/// shared.
 	pub fn data_mut(&mut self) -> &mut [u8] {
+		let loc = self.loc;
 		self.fork();
-		&mut self.data[self.loc]
-	}
-
-	/// Consumes data via a closure, shrinking the location range left by the
-	/// returned byte count. Shorthand for:
-	/// ```no_run
-	/// let data = mem.data();
-	/// let n = data.len();
-	/// for byte in data.into_iter() {
-	/// 	// do something
-	/// 	print!("{byte}");
-	/// }
-	///
-	/// mem.consume(n);
-	/// ```
-	pub fn consume_data(&mut self, consume: impl FnOnce(&[u8]) -> usize) {
-		self.consume(consume(self.data()));
-	}
-
-	/// Adds data via a closure, growing the location range right by the returned
-	/// byte count. Shorthand for:
-	/// ```no_run
-	/// let data = mem.data_mut();
-	/// let n = data.len();
-	/// for byte in data.iter_mut() {
-	/// 	// do something
-	/// 	*byte = 0;
-	/// }
-	///
-	/// mem.add(n);
-	/// ```
-	pub fn add_data(&mut self, add: impl FnMut(&mut [u8]) -> usize) {
-		self.add(add(self.data_mut()));
+		&mut self.get()[loc]
 	}
 
 	/// Pushes one byte to the memory, returning `true` if it could be written.
 	pub fn push(&mut self, byte: u8) -> bool {
 		if self.lim() > 0 {
+			let end = self.end();
 			self.fork();
-			self.data[self.end()] = byte;
+			self.get()[end] = byte;
 			self.add(1);
 			true
 		} else {
@@ -347,8 +325,9 @@ impl<const N: usize> Memory<N> {
 	pub fn push_slice(&mut self, bytes: &[u8]) -> usize {
 		let cnt = min(self.lim(), bytes.len());
 		if cnt > 0 {
+			let range = self.range_of(cnt);
 			self.fork();
-			&mut self.data[self.range_of(cnt)].copy_from_slice(&bytes[..cnt]);
+			(&mut self.get()[range]).copy_from_slice(&bytes[..cnt]);
 			self.add(cnt);
 			cnt
 		} else {
@@ -360,7 +339,7 @@ impl<const N: usize> Memory<N> {
 	pub fn pop_into_slice(&mut self, bytes: &mut [u8]) -> usize {
 		let cnt = min(self.len(), bytes.len());
 		if cnt > 0 {
-			&mut bytes[..cnt].copy_from_slice(&self.data[self.range_of(cnt)]);
+			(&mut bytes[..cnt]).copy_from_slice(&self.data[self.range_of(cnt)]);
 			self.consume(cnt);
 			cnt
 		} else {
@@ -371,21 +350,23 @@ impl<const N: usize> Memory<N> {
 	/// Consumes `n` bytes after reading.
 	pub fn consume(&mut self, n: usize) {
 		if !self.is_shared() {
-			self.data.consume(n);
+			self.get().consume(n);
 		}
 		self.loc.shrink_left(n);
 	}
 
 	/// Adds `n` bytes after writing.
 	pub fn add(&mut self, n: usize) {
-		self.data.add(n);
+		if !self.is_shared() {
+			self.get().add(n);
+		}
 		self.loc.grow_right(n);
 	}
 
 	/// Clears the memory, forking it if shared.
 	pub fn clear(&mut self) {
 		self.fork();
-		self.data.clear();
+		self.get().clear();
 		self.loc.reset();
 	}
 
@@ -396,9 +377,12 @@ impl<const N: usize> Memory<N> {
 
 		// Forked memory is already shifted.
 		if !self.fork() {
-			self.data.data.copy_within(self.data.bounds + self.loc, 0);
-			self.loc         -= n;
-			self.data.bounds -= n;
+			let loc = self.loc;
+			self.loc -= n;
+
+			let data = self.get();
+			data.data.copy_within(data.bounds + loc, 0);
+			data.bounds -= n;
 		}
 	}
 

@@ -89,15 +89,20 @@ impl<const N: usize> Segments<N> {
 
 	/// Reserves at least `count` bytes of segments, increasing [`Self::limit`] to
 	/// `[n,n+N)`.
-	pub fn reserve<P: Pool<N>>(&mut self, count: usize, pool: P) -> Result<(), P::Error> {
+	pub fn reserve<P: Pool<N>>(&mut self, count: usize, pool: &mut P) -> Result<(), P::Error> {
 		pool.claim_size(self, count)
 	}
 
 	/// Recycles all empty segments.
-	pub fn trim<P: Pool<N>>(&mut self, pool: P) -> Result<(), P::Error> {
+	pub fn trim<P: Pool<N>>(&mut self, pool: &mut P) -> Result<(), P::Error> {
 		let range = self.len..self.ring.len();
 		self.lim -= range.len() * N;
 		pool.recycle(self.ring.drain(range))
+	}
+
+	/// Recycles all segments.
+	pub fn clear<P: Pool<N>>(&mut self, pool: &mut P) -> Result<(), P::Error> {
+		pool.recycle(self.ring.drain(..))
 	}
 
 	/// Pushes empty segments to the back of the ring buffer.

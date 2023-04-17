@@ -12,90 +12,101 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::error;
+use std::{fmt, io, result};
+use std::error::Error as StdError;
+use std::fmt::{Debug, Display, Formatter};
 use amplify_derive::Display;
+use crate::{pool, streams};
+use crate::pool::Error as PoolError;
 
-#[derive(Copy, Clone, Debug, Display)]
-pub enum ErrorKind {
-	#[cfg(feature = "shared-pool")]
-	#[display("could not get lock, mutex was poisoned")]
-	Poison,
-	#[display("could not borrow the pool, already in use")]
-	PoolBorrow,
-	#[display("invalid operation on closed stream")]
-	Closed,
-	#[display("could not clear the buffer")]
-	BufClear,
-	#[display("buffered write from source failed")]
-	BufWrite,
-	#[display("buffered read to sink failed")]
-	BufRead,
-	#[display("buffered sink could not be flushed to inner sink")]
-	BufFlush,
-	#[display("buffered stream could not be closed")]
-	BufClose,
+pub type ErrorBox = Box<dyn StdError>;
+
+pub(crate) trait OperationKind: Copy + Debug + Display {
+	fn unknown() -> Self;
 }
 
-#[derive(Debug, Display)]
-#[display("{kind}")]
-pub struct Error {
-	kind: ErrorKind,
-	source: Option<Box<dyn error::Error>>,
+pub(crate) trait ErrorKind: Copy + Debug + Display {
+	fn other(message: &'static str) -> Self;
 }
 
-impl error::Error for Error {
-	fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+#[derive(Debug)]
+pub struct Error<O: OperationKind, E: ErrorKind> {
+	op: O,
+	kind: E,
+	source: Option<ErrorBox>,
+}
+
+impl<O: OperationKind, E: ErrorKind> fmt::Display for Error<O, E> {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		let Self { op, kind, source } = self;
+		if let Some(source) = source {
+			write!(f, "{op} failed; {kind} ({source})")
+		} else {
+			write!(f, "{op} failed; {kind}")
+		}
+	}
+}
+
+impl<O: OperationKind, E: ErrorKind> StdError for Error<O, E> {
+	fn source(&self) -> Option<&(dyn StdError + 'static)> {
 		self.source.as_deref()
 	}
 }
 
-impl Error {
-	fn new(
-		kind: ErrorKind,
-		source: impl error::Error + 'static
+impl<O: OperationKind, K: ErrorKind> Error<O, K> {
+	pub(crate) fn new(
+		op: O,
+		kind: K,
+		source: Option<ErrorBox>
 	) -> Self {
-		Self {
-			kind,
-			source: Some(Box::new(source)),
+		Self { op, kind, source: source.map(Into::into) }
+	}
+
+	/// Creates a new error with a custom message.
+	pub fn other<M: AsRef<str>>(
+		op: O,
+		message: M,
+		source: Option<ErrorBox>
+	) -> Self {
+		Self::new(op, K::other(message.as_ref()), source)
+	}
+
+	/// Returns the operation kind.
+	pub fn operation(&self) -> O { self.op }
+
+	/// Sets the operation kind.
+	pub fn with_operation(mut self, op: O) -> Self {
+		self.op = op;
+		self
+	}
+
+	/// Returns the error kind.
+	pub fn kind(&self) -> K { self.kind }
+
+	/// Sets the error kind.
+	pub fn with_kind(mut self, kind: K) -> Self {
+		self.kind = kind;
+		self
+	}
+}
+
+impl From<&str> for Error {
+	fn from(value: &str) -> Self {
+		Self::other(OperationKind::Unknown, value, None)
+	}
+}
+
+impl From<PoolError> for OperationKind {
+	fn from(value: PoolError) -> Self {
+		match value {
+			PoolError::Claim   => OperationKind::SegClaim,
+			PoolError::Recycle => OperationKind::SegRecycle
 		}
 	}
+}
 
-	#[cfg(feature = "shared-pool")]
-	pub(crate) fn poison(error: std::sync::PoisonError<&mut Vec<Segment>>) -> Self {
-		Self {
-			kind: ErrorKind::Poison,
-			source: Some(Box::new(error)),
-		}
-	}
-
-	pub(crate) fn borrow(error: impl error::Error + 'static) -> Self {
-		Self::new(ErrorKind::PoolBorrow, error)
-	}
-
-	pub(crate) fn closed() -> Self {
-		Self {
-			kind: ErrorKind::Closed,
-			source: None
-		}
-	}
-
-	pub(crate) fn buf_clear(error: impl error::Error + 'static) -> Self {
-		Self::new(ErrorKind::BufClear, error)
-	}
-
-	pub(crate) fn buf_write(error: impl error::Error + 'static) -> Self {
-		Self::new(ErrorKind::BufWrite, error)
-	}
-
-	pub(crate) fn buf_read(error: impl error::Error + 'static) -> Self {
-		Self::new(ErrorKind::BufRead, error)
-	}
-
-	pub(crate) fn buf_flush(error: impl error::Error + 'static) -> Self {
-		Self::new(ErrorKind::BufFlush, error)
-	}
-
-	pub(crate) fn buf_close(error: impl error::Error + 'static) -> Self {
-		Self::new(ErrorKind::BufClose, error)
+impl From<PoolError> for Error {
+	fn from(value: PoolError) -> Self {
+		Self::pool
 	}
 }

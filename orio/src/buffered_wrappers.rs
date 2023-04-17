@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{Buffer, BufSink, BufSource, BufStream, DEFAULT_SEGMENT_SIZE, Error, Pool, Sink, Source, Stream};
+use crate::Buffer;
+use crate::pool::Pool;
+use crate::streams::{Sink, Source, Stream, Result, BufStream, BufSource, Error, OperationKind, BufSink};
+use crate::streams::OperationKind::BufFlush;
 
 pub fn buffer_source<const N: usize, S: Source, P: Pool<N> + Default>(source: S) -> BufferedSource<N, S, P> {
 	BufferedSource {
@@ -37,13 +40,13 @@ pub struct BufferedSource<const N: usize, S: Source, P: Pool<N>> {
 }
 
 impl<const N: usize, S: Source, P: Pool<N>> Stream for BufferedSource<N, S, P> {
-	fn close(&mut self) -> Result<(), Self::Error> {
+	fn close(&mut self) -> Result {
 		if !self.closed {
 			self.closed = true;
 			let buf_close = self.buffer.close();
 			let src_close = self.source.close();
 			buf_close?;
-			src_close.map_err(Error::buf_close)
+			src_close
 		} else {
 			Ok(())
 		}
@@ -51,7 +54,7 @@ impl<const N: usize, S: Source, P: Pool<N>> Stream for BufferedSource<N, S, P> {
 }
 
 impl<const N: usize, S: Source, P: Pool<N>> Source for BufferedSource<N, S, P> {
-	fn read<const X: usize>(&mut self, buffer: &mut Buffer<X, impl Pool<X>>, count: usize) -> Result<usize, Self::Error> {
+	fn read<const X: usize>(&mut self, buffer: &mut Buffer<X, impl Pool<X>>, count: usize) -> Result<usize> {
 		todo!()
 	}
 }
@@ -62,8 +65,9 @@ impl<const N: usize, S: Source, P: Pool<N>> BufStream<N> for BufferedSource<N, S
 }
 
 impl<const N: usize, S: Source, P: Pool<N>> BufSource<N> for BufferedSource<N, S, P> {
-	fn read_all(&mut self, mut sink: &mut impl Sink) -> Result<usize, Self::Error> {
-		sink.write_all(self.buf()).map_err(Error::buf_read)
+	fn read_all(&mut self, mut sink: &mut impl Sink) -> Result<usize> {
+		sink.write_all(self.buf())
+			.map_err(Error::with_op_buf_read)
 	}
 }
 
@@ -80,13 +84,13 @@ pub struct BufferedSink<const N: usize, S: Sink, P: Pool<N>> {
 }
 
 impl<const N: usize, S: Sink, P: Pool<N>> Stream for BufferedSink<N, S, P> {
-	fn close(&mut self) -> Result<(), Self::Error> {
+	fn close(&mut self) -> Result {
 		if !self.closed {
 			self.closed = true;
 			let flush = self.flush();
 			let clear = self.buffer.close();
 			flush?;
-			clear.map_err(Error::buf_close)
+			clear
 		} else {
 			Ok(())
 		}
@@ -94,20 +98,24 @@ impl<const N: usize, S: Sink, P: Pool<N>> Stream for BufferedSink<N, S, P> {
 }
 
 impl<const N: usize, S: Sink, P: Pool<N>> Sink for BufferedSink<N, S, P> {
-	fn write<const B: usize>(&mut self, buffer: &mut Buffer<B, impl Pool<B>>, count: usize) -> Result<usize, Self::Error> {
+	fn write<const B: usize>(&mut self, buffer: &mut Buffer<B, impl Pool<B>>, count: usize) -> Result<usize> {
 		todo!()
 	}
 
-	fn flush(&mut self) -> Result<(), Self::Error> {
+	fn flush(&mut self) -> Result {
 		if !self.closed {
 			// Both of these need a chance to run before returning an error.
-			let read  = self.sink.write_all(&mut self.buffer).map_err(Error::buf_flush);
-			let flush = self.sink.flush().map_err(Error::buf_flush);
+			let read = self.sink
+						   .write_all(&mut self.buffer)
+						   .map_err(Error::with_op_buf_flush);
+			let flush = self.sink
+							.flush()
+							.map_err(Error::with_op_buf_flush);
 			read?;
 			flush?;
 			Ok(())
 		} else {
-			return Err(Error::closed())
+			return Err(Error::closed(BufFlush))
 		}
 	}
 }
@@ -118,8 +126,9 @@ impl<const N: usize, S: Sink, P: Pool<N>> BufStream<N> for BufferedSink<N, S, P>
 }
 
 impl<const N: usize, S: Sink, P: Pool<N>> BufSink<N> for BufferedSink<N, S, P> {
-	fn write_all(&mut self, source: &mut impl Source) -> Result<usize, Self::Error> {
-		source.read_all(self.buf()).map_err(Error::buf_write)
+	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
+		source.read_all(self.buf())
+			  .map_err(Error::with_op_buf_write)
 	}
 }
 

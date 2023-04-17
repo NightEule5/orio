@@ -68,8 +68,6 @@ mod streams;
 
 pub use error::*;
 pub(crate) use segment::*;
-pub use pool::*;
 pub use buffer::*;
-pub use streams::*;
 
 pub(crate) const DEFAULT_SEGMENT_SIZE: usize = 8 * 1024;

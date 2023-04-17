@@ -15,7 +15,8 @@
 mod memory;
 
 use std::collections::VecDeque;
-use crate::{DEFAULT_SEGMENT_SIZE, Pool};
+use crate::DEFAULT_SEGMENT_SIZE;
+use crate::pool::{Pool, Result};
 
 /// A group [`Segment`]s contained in a ring buffer, with empty segments pushed to
 /// the back and laden segments in front. To read and write, segments are pushed
@@ -89,19 +90,19 @@ impl<const N: usize> Segments<N> {
 
 	/// Reserves at least `count` bytes of segments, increasing [`Self::limit`] to
 	/// `[n,n+N)`.
-	pub fn reserve<P: Pool<N>>(&mut self, count: usize, pool: &mut P) -> Result<(), P::Error> {
+	pub fn reserve<P: Pool<N>>(&mut self, count: usize, pool: &mut P) -> Result {
 		pool.claim_size(self, count)
 	}
 
 	/// Recycles all empty segments.
-	pub fn trim<P: Pool<N>>(&mut self, pool: &mut P) -> Result<(), P::Error> {
+	pub fn trim<P: Pool<N>>(&mut self, pool: &mut P) -> Result {
 		let range = self.len..self.ring.len();
 		self.lim -= range.len() * N;
 		pool.recycle(self.ring.drain(range))
 	}
 
 	/// Recycles all segments.
-	pub fn clear<P: Pool<N>>(&mut self, pool: &mut P) -> Result<(), P::Error> {
+	pub fn clear<P: Pool<N>>(&mut self, pool: &mut P) -> Result {
 		pool.recycle(self.ring.drain(..))
 	}
 

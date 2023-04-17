@@ -66,22 +66,22 @@ impl Error {
 	pub fn borrowed(op: OperationKind, source: ErrorBox) -> Self {
 		Self::new(op, Borrowed, Some(source))
 	}
-	
+
 	fn claim_borrow(source: ErrorBox) -> Self {
 		Self::borrowed(Claim, source)
 	}
-	
+
 	fn recycle_borrow(source: ErrorBox) -> Self {
 		Self::borrowed(Recycle, source)
 	}
 }
 
-pub trait Pool<const N: usize> {
+pub trait Pool {
 	/// Claims a single segment.
-	fn claim_one(&self) -> Result<Segment<N>>;
+	fn claim_one(&self) -> Result<Segment>;
 
 	/// Claims `count` segments into the container.
-	fn claim_count(&self, segments: &mut Segments<N>, count: usize) -> Result {
+	fn claim_count(&self, segments: &mut Segments, count: usize) -> Result {
 		for _ in 0..count {
 			segments.push(self.claim_one()?)
 		}
@@ -90,17 +90,18 @@ pub trait Pool<const N: usize> {
 	}
 
 	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size(&self, segments: &mut Segments<N>, min_size: usize) -> Result {
+	fn claim_size(&self, segments: &mut Segments, min_size: usize) -> Result {
+		const N: usize = DEFAULT_SEGMENT_SIZE;
 		let count = min_size / N + (min_size % N > 0) as usize;
 
 		self.claim_count(segments, count)
 	}
 
 	/// Recycles a single segment back into the pool.
-	fn recycle_one(&self, segment: Segment<N>) -> Result;
+	fn recycle_one(&self, segment: Segment) -> Result;
 
 	/// Recycles many segments back into the pool.
-	fn recycle(&self, segments: impl IntoIterator<Item = Segment<N>>) -> Result {
+	fn recycle(&self, segments: impl IntoIterator<Item = Segment>) -> Result {
 		for seg in segments {
 			self.recycle_one(seg)?;
 		}
@@ -111,9 +112,9 @@ pub trait Pool<const N: usize> {
 
 cfg_if! {
 	if #[cfg(feature = "shared-pool")] {
-		pub type DefaultPool<const N: usize = DEFAULT_SEGMENT_SIZE> = SharedPool<N>;
+		pub type DefaultPool = SharedPool;
 	} else {
-		pub type DefaultPool<const N: usize = DEFAULT_SEGMENT_SIZE> = LocalPool<N>;
+		pub type DefaultPool = LocalPool;
 	}
 }
 
@@ -121,12 +122,12 @@ cfg_if! {
 static LOCAL_POOL: Lazy<LocalPool> = Lazy::new(|| LocalPool::default());
 
 #[derive(Clone)]
-pub struct LocalPool<const N: usize = DEFAULT_SEGMENT_SIZE> {
-	segments: Rc<RefCell<Vec<Segment<N>>>>
+pub struct LocalPool {
+	segments: Rc<RefCell<Vec<Segment>>>
 }
 
-impl<const N: usize> Pool<N> for LocalPool<N> {
-	fn claim_one(&self) -> Result<Segment<N>> {
+impl Pool for LocalPool {
+	fn claim_one(&self) -> Result<Segment> {
 		Ok(
 			self.get_vec()
 				.map_err(Error::claim_borrow)
@@ -135,7 +136,7 @@ impl<const N: usize> Pool<N> for LocalPool<N> {
 		)
 	}
 
-	fn claim_count(&self, segments: &mut Segments<N>, count: usize) -> Result {
+	fn claim_count(&self, segments: &mut Segments, count: usize) -> Result {
 		let mut vec = self.get_vec().map_err(Error::claim_borrow);
 		let len = vec.len();
 		let extra = count - len;
@@ -148,7 +149,7 @@ impl<const N: usize> Pool<N> for LocalPool<N> {
 		Ok(())
 	}
 
-	fn recycle_one(&self, mut segment: Segment<N>) -> Result {
+	fn recycle_one(&self, mut segment: Segment) -> Result {
 		segment.clear();
 		self.get_vec()
 			.map_err(Error::recycle_borrow)
@@ -156,9 +157,9 @@ impl<const N: usize> Pool<N> for LocalPool<N> {
 		Ok(())
 	}
 
-	fn recycle(&self, segments: impl IntoIterator<Item = Segment<N>>) -> Result {
+	fn recycle(&self, segments: impl IntoIterator<Item = Segment>) -> Result {
 		struct Cleared<I>(I);
-		impl<const N: usize, I: Iterator<Item = Segment<N>>> Iterator for Cleared<I> {
+		impl<I: Iterator<Item = Segment>> Iterator for Cleared<I> {
 			type Item = I::Item;
 
 			fn next(&mut self) -> Option<Self::Item> {
@@ -178,8 +179,8 @@ impl<const N: usize> Pool<N> for LocalPool<N> {
 	}
 }
 
-impl<const N: usize> LocalPool<N> {
-	fn get_vec(&self) -> Result<RefMut<'_, Vec<Segment<N>>>, ErrorBox> {
+impl LocalPool {
+	fn get_vec(&self) -> Result<RefMut<'_, Vec<Segment>>, ErrorBox> {
 		Ok(self.segments.try_borrow_mut()?)
 	}
 }

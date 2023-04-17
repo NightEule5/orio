@@ -97,16 +97,16 @@ impl Error {
 	pub fn io_source(&self) -> Option<&io::Error> {
 		self.source()?.downcast_ref()
 	}
-	
+
 	/// Convenience shorthand for `with_operation(OperationKind::BufRead)`.
 	pub fn with_op_buf_read(mut self) -> Self { self.with_operation(BufRead) }
-	
+
 	/// Convenience shorthand for `with_operation(OperationKind::BufWrite)`.
 	pub fn with_op_buf_write(mut self) -> Self { self.with_operation(BufWrite) }
-	
+
 	/// Convenience shorthand for `with_operation(OperationKind::BufClear)`.
 	pub fn with_op_buf_clear(mut self) -> Self { self.with_operation(BufClear) }
-	
+
 	/// Convenience shorthand for `with_operation(OperationKind::BufFlush)`.
 	pub fn with_op_buf_flush(mut self) -> Self { self.with_operation(BufFlush) }
 }
@@ -122,34 +122,34 @@ pub trait Stream {
 /// A data source.
 pub trait Source: Stream {
 	/// Reads `count` bytes from the source into the buffer.
-	fn read<const N: usize>(&mut self, sink: &mut Buffer<N, impl Pool<N>>, count: usize) -> Result<usize>;
+	fn read(&mut self, sink: &mut Buffer<impl Pool>, count: usize) -> Result<usize>;
 
 	/// Reads all bytes from the source into the buffer.
 	#[inline]
-	fn read_all<const N: usize>(&mut self, sink: &mut Buffer<N, impl Pool<N>>) -> Result<usize> {
+	fn read_all(&mut self, sink: &mut Buffer<impl Pool>) -> Result<usize> {
 		self.read(sink, usize::MAX)
 	}
 }
 
-pub trait SourceBuffer<const N: usize>: Source + Sized {
+pub trait SourceBuffer: Source + Sized {
 	/// Wrap the source in a buffered source.
-	fn buffer<P: Pool<N> + Default>(self) -> impl BufSource<N> { buffer_source::<N, _, P>(self) }
+	fn buffer<P: Pool + Default>(self) -> impl BufSource { buffer_source::<_, P>(self) }
 }
 
-impl<const N: usize, S: Source> SourceBuffer<N> for S { }
+impl<S: Source> SourceBuffer for S { }
 
 /// A data sink.
 pub trait Sink: Stream {
 	/// Writes `count` bytes from the buffer into the sink.
-	fn write<const N: usize>(
+	fn write(
 		&mut self,
-		source: &mut Buffer<N, impl Pool<N>>,
+		source: &mut Buffer<impl Pool>,
 		count: usize
 	) -> Result<usize>;
 
 	/// Writes all bytes from the buffer into the sink.
 	#[inline]
-	fn write_all<const N: usize>(&mut self, source: &mut Buffer<N, impl Pool<N>>) -> Result<usize> {
+	fn write_all(&mut self, source: &mut Buffer<impl Pool>) -> Result<usize> {
 		self.write(source, source.count())
 	}
 
@@ -164,22 +164,22 @@ impl<S: Sink> Stream for S {
 	default fn close(&mut self) -> Result { self.flush() }
 }
 
-pub trait SinkBuffer<const N: usize>: Sink + Sized {
+pub trait SinkBuffer: Sink + Sized {
 	/// Wrap the sink in a buffered sink.
-	fn buffer<P: Pool<N> + Default>(self) -> impl BufSink<N> { buffer_sink::<N, _, P>(self) }
+	fn buffer<P: Pool + Default>(self) -> impl BufSink { buffer_sink::<_, P>(self) }
 }
 
-impl<const N: usize, S: Sink> SinkBuffer<N> for S { }
+impl<S: Sink> SinkBuffer for S { }
 
-pub trait BufStream<const N: usize = DEFAULT_SEGMENT_SIZE> {
-	type Pool: Pool<N> = DefaultPool<N>;
-	fn buf(&mut self) -> &mut Buffer<N, Self::Pool>;
+pub trait BufStream {
+	type Pool: Pool = DefaultPool;
+	fn buf(&mut self) -> &mut Buffer<Self::Pool>;
 }
 
-pub trait BufSource<const N: usize = DEFAULT_SEGMENT_SIZE>: BufStream<N> + Source {
+pub trait BufSource: BufStream + Source {
 	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize>;
 }
 
-pub trait BufSink<const N: usize = DEFAULT_SEGMENT_SIZE>: BufStream<N> + Sink {
+pub trait BufSink: BufStream + Sink {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize>;
 }

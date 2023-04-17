@@ -21,18 +21,18 @@ use crate::pool::{Pool, Result};
 /// A group [`Segment`]s contained in a ring buffer, with empty segments pushed to
 /// the back and laden segments in front. To read and write, segments are pushed
 /// and popped from the ring buffer.
-pub struct Segments<const N: usize = DEFAULT_SEGMENT_SIZE> {
+pub struct Segments {
 	len: usize,
 	lim: usize,
 	cnt: usize,
-	ring: VecDeque<Segment<N>>,
+	ring: VecDeque<Segment>,
 }
 
-impl<const N: usize> Default for Segments<N> {
+impl<const N: usize> Default for Segments {
 	fn default() -> Self { Self::new() }
 }
 
-impl<const N: usize> Segments<N> {
+impl<const N: usize> Segments {
 	pub fn new() -> Self {
 		Self {
 			len: 0,
@@ -50,7 +50,7 @@ impl<const N: usize> Segments<N> {
 
 	/// Pushes a segment to the ring buffer. Segments with data are appended after
 	/// the last non-empty segment, empty segments are pushed to the back.
-	pub fn push(&mut self, seg: Segment<N>) {
+	pub fn push(&mut self, seg: Segment) {
 		if seg.is_empty() {
 			self.push_empty(seg);
 		} else {
@@ -60,7 +60,7 @@ impl<const N: usize> Segments<N> {
 
 	/// Pops the back-most unfilled [`Segment`] from the ring buffer. Used for
 	/// writing.
-	pub fn pop_back(&mut self) -> Option<Segment<N>> {
+	pub fn pop_back(&mut self) -> Option<Segment> {
 		let seg = if self.has_empty() {
 			// Faster to replace the popped segment with a fresh one from the back
 			// if possible.
@@ -81,7 +81,7 @@ impl<const N: usize> Segments<N> {
 	}
 
 	/// Pops the front [`Segment`] from the ring buffer. Used for reading.
-	pub fn pop_front(&mut self) -> Option<Segment<N>> {
+	pub fn pop_front(&mut self) -> Option<Segment> {
 		let seg = self.ring.pop_front()?;
 		self.len -= 1;
 		self.cnt -= seg.len();
@@ -90,24 +90,24 @@ impl<const N: usize> Segments<N> {
 
 	/// Reserves at least `count` bytes of segments, increasing [`Self::limit`] to
 	/// `[n,n+N)`.
-	pub fn reserve<P: Pool<N>>(&mut self, count: usize, pool: &mut P) -> Result {
+	pub fn reserve<P: Pool>(&mut self, count: usize, pool: &mut P) -> Result {
 		pool.claim_size(self, count)
 	}
 
 	/// Recycles all empty segments.
-	pub fn trim<P: Pool<N>>(&mut self, pool: &mut P) -> Result {
+	pub fn trim<P: Pool>(&mut self, pool: &mut P) -> Result {
 		let range = self.len..self.ring.len();
 		self.lim -= range.len() * N;
 		pool.recycle(self.ring.drain(range))
 	}
 
 	/// Recycles all segments.
-	pub fn clear<P: Pool<N>>(&mut self, pool: &mut P) -> Result {
+	pub fn clear<P: Pool>(&mut self, pool: &mut P) -> Result {
 		pool.recycle(self.ring.drain(..))
 	}
 
 	/// Pushes empty segments to the back of the ring buffer.
-	pub fn extend_empty(&mut self, segments: impl IntoIterator<Item = Segment<N>>) {
+	pub fn extend_empty(&mut self, segments: impl IntoIterator<Item = Segment>) {
 		self.ring.extend(segments);
 	}
 
@@ -158,23 +158,23 @@ impl<const N: usize> Segments<N> {
 		self.ring = dst;
 	}
 
-	fn get(&self) -> &Segment<N> {
+	fn get(&self) -> &Segment {
 		&self.ring[self.len]
 	}
 
 	fn has_empty(&self) -> bool { self.len < self.ring.len() }
 
-	fn push_front(&mut self, seg: Segment<N>) {
+	fn push_front(&mut self, seg: Segment) {
 		self.ring.push_front(seg);
 		self.len += 1;
 	}
 
-	fn push_empty(&mut self, seg: Segment<N>) {
+	fn push_empty(&mut self, seg: Segment) {
 		self.lim += N;
 		self.ring.push_back(seg);
 	}
 
-	fn push_laden(&mut self, seg: Segment<N>) {
+	fn push_laden(&mut self, seg: Segment) {
 		let cur_lim = if self.len == 0 { 0 } else { self.get().lim() };
 		self.cnt += seg.len();
 		self.lim += seg.lim();

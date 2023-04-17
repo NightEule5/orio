@@ -12,22 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::DEFAULT_SEGMENT_SIZE;
 use crate::pool::{DefaultPool, Pool};
 use crate::segment::Segments;
 use crate::streams::{BufSink, BufSource, BufStream, Error, Result, Sink, Source, Stream};
 
-pub struct Buffer<const N: usize = DEFAULT_SEGMENT_SIZE, P: Pool<N> = DefaultPool<N>> {
+pub struct Buffer<P: Pool = DefaultPool> {
 	pool: P,
-	segments: Segments<N>,
+	segments: Segments,
 	closed: bool,
 }
 
-impl<const N: usize, P: Pool<N> + Default> Default for Buffer<N, P> {
+impl<P: Pool + Default> Default for Buffer<P> {
 	fn default() -> Self { Self::new(P::default()) }
 }
 
-impl<const N: usize, P: Pool<N>> Buffer<N, P> {
+impl<P: Pool> Buffer<P> {
 	pub fn new(pool: P) -> Self {
 		Self {
 			pool,
@@ -51,13 +50,13 @@ impl<const N: usize, P: Pool<N>> Buffer<N, P> {
 	}
 }
 
-impl<const N: usize, P: Pool<N>> Drop for Buffer<N, P> {
+impl<P: Pool> Drop for Buffer<P> {
 	fn drop(&mut self) {
 		let _ = self.close();
 	}
 }
 
-impl<const N: usize, P: Pool<N>> Stream for Buffer<N, P> {
+impl<P: Pool> Stream for Buffer<P> {
 	fn close(&mut self) -> Result {
 		if !self.closed {
 			self.closed = true;
@@ -68,39 +67,39 @@ impl<const N: usize, P: Pool<N>> Stream for Buffer<N, P> {
 	}
 }
 
-impl<const N: usize, P: Pool<N>> Source for Buffer<N, P> {
-	fn read<const X: usize>(&mut self, sink: &mut Buffer<X, impl Pool<X>>, count: usize) -> Result<usize> {
+impl<P: Pool> Source for Buffer<P> {
+	fn read(&mut self, sink: &mut Buffer<impl Pool>, count: usize) -> Result<usize> {
 		todo!()
 	}
 
-	fn read_all<const X: usize>(&mut self, sink: &mut Buffer<X, impl Pool<X>>) -> Result<usize> {
-		todo!()
-	}
-}
-
-impl<const N: usize, P: Pool<N>> Sink for Buffer<N, P> {
-	fn write<const X: usize>(&mut self, source: &mut Buffer<X, impl Pool<X>>, count: usize) -> Result<usize> {
-		todo!()
-	}
-
-	fn write_all<const X: usize>(&mut self, source: &mut Buffer<X, impl Pool<X>>) -> Result<usize> {
+	fn read_all(&mut self, sink: &mut Buffer<impl Pool>) -> Result<usize> {
 		todo!()
 	}
 }
 
-impl<const N: usize, P: Pool<N>> BufStream<N> for Buffer<N, P> {
+impl<P: Pool> Sink for Buffer<P> {
+	fn write(&mut self, source: &mut Buffer<impl Pool>, count: usize) -> Result<usize> {
+		todo!()
+	}
+
+	fn write_all(&mut self, source: &mut Buffer<impl Pool>) -> Result<usize> {
+		todo!()
+	}
+}
+
+impl<P: Pool> BufStream for Buffer<P> {
 	type Pool = P;
 	fn buf(&mut self) -> &mut Self { self }
 }
 
-impl<const N: usize, P: Pool<N>> BufSource<N> for Buffer<N, P> {
+impl<P: Pool> BufSource for Buffer<P> {
 	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize> {
 		sink.write_all(self)
 			.map_err(Error::with_op_buf_read)
 	}
 }
 
-impl<const N: usize, P: Pool<N>> BufSink<N> for Buffer<N, P> {
+impl<P: Pool> BufSink for Buffer<P> {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
 		source.read_all(self)
 			  .map_err(Error::with_op_buf_write)

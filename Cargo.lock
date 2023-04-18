@@ -44,6 +44,7 @@ dependencies = [
  "amplify_derive",
  "cfg-if",
  "once_cell",
+ "simdutf8",
 ]
 
 [[package]]
@@ -63,6 +64,12 @@ checksum = "4424af4bf778aae2051a77b60283332f386554255d722233d09fbfc7e30da2fc"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "simdutf8"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f27f6278552951f1f2b8cf9da965d10969b2efdea95a6ec47987ab46edfe263a"
 
 [[package]]
 name = "syn"

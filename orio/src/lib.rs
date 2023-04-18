@@ -53,11 +53,14 @@
 #![feature(
 	associated_type_defaults,
 	get_mut_unchecked,
+	pattern,
 	return_position_impl_trait_in_trait,
 	specialization,
 	thread_local,
 	type_alias_impl_trait,
 )]
+
+extern crate core;
 
 mod segment;
 mod pool;
@@ -65,6 +68,7 @@ mod buffer;
 mod buffered_wrappers;
 mod error;
 mod streams;
+mod util;
 
 pub use error::*;
 pub(crate) use segment::*;

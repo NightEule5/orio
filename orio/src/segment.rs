@@ -13,10 +13,12 @@
 // limitations under the License.
 
 mod memory;
+mod seg_slice;
 
 use std::collections::VecDeque;
 use crate::DEFAULT_SEGMENT_SIZE;
 use crate::pool::{Pool, Result};
+pub use crate::segment::seg_slice::SegSlice;
 
 /// A group [`Segment`]s contained in a ring buffer, with empty segments pushed to
 /// the back and laden segments in front. To read and write, segments are pushed
@@ -56,6 +58,11 @@ impl<const N: usize> Segments {
 		} else {
 			self.push_laden(seg);
 		}
+	}
+
+	/// Returns a slice-like view of bytes contains in the segments.
+	pub fn as_slice(&self) -> SegSlice {
+		SegSlice::new(0, self.cnt, &self.ring[..self.len])
 	}
 
 	/// Pops the back-most unfilled [`Segment`] from the ring buffer. Used for

@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io::Write;
-use crate::Buffer;
+use ErrorKind::Eos;
+use crate::{Buffer, DEFAULT_SEGMENT_SIZE};
 use crate::pool::Pool;
-use crate::streams::{Sink, Source, Stream, Result, BufStream, BufSource, Error, BufSink};
-use crate::streams::OperationKind::BufFlush;
+use crate::streams::{Sink, Source, Stream, Result, BufStream, BufSource, Error, BufSink, ErrorKind};
+use crate::streams::OperationKind::{BufFlush, BufRead};
 
 pub fn buffer_source<S: Source, P: Pool + Default>(source: S) -> BufferedSource<S, P> {
 	BufferedSource {
@@ -40,6 +40,25 @@ pub struct BufferedSource<S: Source, P: Pool> {
 	closed: bool,
 }
 
+impl<S: Source, P: Pool> BufferedSource<S, P> {
+	/// Fills the buffer, rounding up to the nearest segment size.
+	fn fill_buf(&mut self, mut byte_count: usize) -> Result<bool> {
+		const SEG_SIZE: usize = DEFAULT_SEGMENT_SIZE;
+		let count = self.buffer.count();
+		let seg_count = (count + byte_count + SEG_SIZE - 1) / SEG_SIZE;
+		byte_count = seg_count * SEG_SIZE - count;
+
+		let cnt = self.source
+					  .read(&mut self.buffer, byte_count)
+					  .map_err(Error::with_op_buf_read);
+		match cnt {
+			Ok(cnt)                      => Ok(cnt > 0),
+			Err(Error { kind: Eos, .. }) => Ok(false),
+			error                        => error
+		}
+	}
+}
+
 impl<S: Source, P: Pool> Stream for BufferedSource<S, P> {
 	fn close(&mut self) -> Result {
 		if !self.closed {
@@ -55,17 +74,29 @@ impl<S: Source, P: Pool> Stream for BufferedSource<S, P> {
 }
 
 impl<S: Source, P: Pool> Source for BufferedSource<S, P> {
-	fn read(&mut self, buffer: &mut Buffer<impl Pool>, count: usize) -> Result<usize> {
-		todo!()
+	fn read(&mut self, buffer: &mut Buffer<impl Pool>, byte_count: usize) -> Result<usize> {
+		if self.closed { return Err(Error::closed(BufRead)) }
+
+		self.request(byte_count)?;
+		self.buffer.read(buffer, byte_count)
 	}
 }
 
 impl<S: Source, P: Pool> BufStream for BufferedSource<S, P> {
-	type Pool = P;
-	fn buf(&mut self) -> &mut Buffer<P> { &mut self.buffer }
+	fn buf(&mut self) -> &mut Buffer<dyn Pool> { &mut self.buffer }
 }
 
 impl<S: Source, P: Pool> BufSource for BufferedSource<S, P> {
+	fn request(&mut self, byte_count: usize) -> Result<bool> {
+		if self.closed { return Ok(false) }
+
+		self.buffer
+			.request(byte_count)
+			.or_else(||
+				self.fill_buf(byte_count)
+			)
+	}
+
 	fn read_all(&mut self, mut sink: &mut impl Sink) -> Result<usize> {
 		sink.write_all(self.buf())
 			.map_err(Error::with_op_buf_read)
@@ -99,8 +130,10 @@ impl<S: Sink, P: Pool> Stream for BufferedSink<S, P> {
 }
 
 impl<S: Sink, P: Pool> Sink for BufferedSink<S, P> {
-	fn write(&mut self, buffer: &mut Buffer<impl Pool>, count: usize) -> Result<usize> {
-		todo!()
+	fn write(&mut self, buffer: &mut Buffer<impl Pool>, byte_count: usize) -> Result<usize> {
+		let cnt = self.buffer.write(buffer, byte_count)?;
+		self.flush()?;
+		Ok(cnt)
 	}
 
 	fn flush(&mut self) -> Result {
@@ -122,8 +155,7 @@ impl<S: Sink, P: Pool> Sink for BufferedSink<S, P> {
 }
 
 impl<S: Sink, P: Pool> BufStream for BufferedSink<S, P> {
-	type Pool = P;
-	fn buf(&mut self) -> &mut Buffer<Self::Pool> { &mut self.buffer }
+	fn buf(&mut self) -> &mut Buffer<dyn Pool> { &mut self.buffer }
 }
 
 impl<S: Sink, P: Pool> BufSink for BufferedSink<S, P> {

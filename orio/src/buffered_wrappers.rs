@@ -54,7 +54,7 @@ impl<S: Source, P: Pool> BufferedSource<S, P> {
 		match cnt {
 			Ok(cnt)                      => Ok(cnt > 0),
 			Err(Error { kind: Eos, .. }) => Ok(false),
-			error                        => error
+			Err(error)                   => Err(error)
 		}
 	}
 }
@@ -83,22 +83,23 @@ impl<S: Source, P: Pool> Source for BufferedSource<S, P> {
 }
 
 impl<S: Source, P: Pool> BufStream for BufferedSource<S, P> {
-	fn buf(&mut self) -> &mut Buffer<dyn Pool> { &mut self.buffer }
+	fn buf(&self) -> &Buffer<impl Pool> { &self.buffer }
+	fn buf_mut(&mut self) -> &mut Buffer<impl Pool> { &mut self.buffer }
 }
 
 impl<S: Source, P: Pool> BufSource for BufferedSource<S, P> {
 	fn request(&mut self, byte_count: usize) -> Result<bool> {
 		if self.closed { return Ok(false) }
 
-		self.buffer
-			.request(byte_count)
-			.or_else(||
-				self.fill_buf(byte_count)
-			)
+		if self.buffer.request(byte_count)? {
+			return Ok(true)
+		}
+
+		self.fill_buf(byte_count)
 	}
 
 	fn read_all(&mut self, mut sink: &mut impl Sink) -> Result<usize> {
-		sink.write_all(self.buf())
+		sink.write_all(self.buf_mut())
 			.map_err(Error::with_op_buf_read)
 	}
 }
@@ -155,12 +156,13 @@ impl<S: Sink, P: Pool> Sink for BufferedSink<S, P> {
 }
 
 impl<S: Sink, P: Pool> BufStream for BufferedSink<S, P> {
-	fn buf(&mut self) -> &mut Buffer<dyn Pool> { &mut self.buffer }
+	fn buf(&self) -> &Buffer<impl Pool> { &self.buffer }
+	fn buf_mut(&mut self) -> &mut Buffer<impl Pool> { &mut self.buffer }
 }
 
 impl<S: Sink, P: Pool> BufSink for BufferedSink<S, P> {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
-		source.read_all(self.buf())
+		source.read_all(self.buf_mut())
 			  .map_err(Error::with_op_buf_write)
 	}
 }

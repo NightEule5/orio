@@ -12,31 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt, io, result};
+use std::fmt;
 use std::error::Error as StdError;
 use std::fmt::{Debug, Display, Formatter};
-use amplify_derive::Display;
-use crate::{pool, streams};
 use crate::pool::Error as PoolError;
 
 pub type ErrorBox = Box<dyn StdError>;
 
-pub(crate) trait OperationKind: Copy + Debug + Display {
+pub trait OperationKind: Copy + Debug + Display {
 	fn unknown() -> Self;
 }
 
-pub(crate) trait ErrorKind: Copy + Debug + Display {
+pub trait ErrorKind: Copy + Debug + Display {
 	fn other(message: &'static str) -> Self;
 }
 
 #[derive(Debug)]
 pub struct Error<O: OperationKind, E: ErrorKind> {
 	op: O,
-	kind: E,
+	pub(crate) kind: E,
 	source: Option<ErrorBox>,
 }
 
-impl<O: OperationKind, E: ErrorKind> fmt::Display for Error<O, E> {
+impl<O: OperationKind, E: ErrorKind> Display for Error<O, E> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		let Self { op, kind, source } = self;
 		if let Some(source) = source {
@@ -63,12 +61,12 @@ impl<O: OperationKind, K: ErrorKind> Error<O, K> {
 	}
 
 	/// Creates a new error with a custom message.
-	pub fn other<M: AsRef<str>>(
+	pub fn other(
 		op: O,
-		message: M,
+		message: &'static str,
 		source: Option<ErrorBox>
 	) -> Self {
-		Self::new(op, K::other(message.as_ref()), source)
+		Self::new(op, K::other(message), source)
 	}
 
 	/// Returns the operation kind.
@@ -90,23 +88,8 @@ impl<O: OperationKind, K: ErrorKind> Error<O, K> {
 	}
 }
 
-impl From<&str> for Error {
-	fn from(value: &str) -> Self {
-		Self::other(OperationKind::Unknown, value, None)
-	}
-}
-
-impl From<PoolError> for OperationKind {
-	fn from(value: PoolError) -> Self {
-		match value {
-			PoolError::Claim   => OperationKind::SegClaim,
-			PoolError::Recycle => OperationKind::SegRecycle
-		}
-	}
-}
-
-impl From<PoolError> for Error {
-	fn from(value: PoolError) -> Self {
-		Self::pool
+impl<O: OperationKind, K: ErrorKind> From<&'static str> for Error<O, K> {
+	fn from(value: &'static str) -> Self {
+		Self::other(O::unknown(), value, None)
 	}
 }

@@ -13,41 +13,76 @@
 // limitations under the License.
 
 use std::cmp::min;
-use std::iter::Peekable;
-use std::ops::{Index, Range, RangeFrom, RangeInclusive, RangeTo, RangeToInclusive};
-use std::slice::SliceIndex;
+use std::collections::Bound;
+use std::error::Error;
+use std::fmt;
+use std::fmt::{Display, Formatter};
+use std::ops::{Index, Range, RangeBounds};
+use std::str::pattern::Pattern;
+use itertools::FoldWhile::{Continue, Done};
+use itertools::Itertools;
 use simdutf8::compat::{from_utf8, Utf8Error};
 use crate::segment::Segment;
 
-/// A group of [`Segment`]s that can act as a slice of bytes. While segments are
-/// not contiguous, they can implement much of the same operations as native slices.
-#[derive(Copy, Clone, Default)]
-pub struct SegSlice<'a> {
-	start: usize,
-	end  : usize,
-	slice: &'a [Segment],
+/// A group of shared [`Segment`]s the can act as a pseudo-slice of bytes.
+pub struct SegmentSlice {
+	len: usize,
+	segments: Vec<Segment>
 }
 
-impl SegSlice<'_> {
-	pub(crate) fn new(start: usize, end: usize, slice: &[Segment]) -> Self {
-		Self { start, end, slice }
+impl SegmentSlice {
+	pub(crate) fn new(segments: &[Segment], range: Range<usize>) -> Self {
+		Self {
+			len: range.len(),
+			segments: {
+				if range.is_empty() {
+					Vec::new()
+				} else {
+					let mut vec: Vec<_> = segments.iter()
+												  .map(Segment::share_all)
+												  .collect();
+					let Range { mut start, mut end, .. } = range;
+
+					for seg in vec.iter_mut() {
+						let n = min(seg.len(), start);
+						start -= n;
+
+						seg.consume(n);
+
+						if start == 0 {
+							break
+						}
+					}
+
+					for seg in vec.iter_mut().rev() {
+						let n = min(seg.len(), end);
+						end -= n;
+
+						seg.truncate(n);
+
+						if end == 0 {
+							break
+						}
+					}
+
+					vec.retain(|seg| !seg.is_empty());
+					vec
+				}
+			}
+		}
 	}
-	
-	pub(crate) fn inner(&self) -> &[Segment] { self.slice }
 
 	/// Returns the length.
-	pub fn len(&self) -> usize { self.end - self.start }
-	/// Returns the start index.
-	pub fn start(&self) -> usize { self.start }
-	/// Returns the end index.
-	pub fn end  (&self) -> usize { self.end   }
+	pub fn len(&self) -> usize { self.len }
+
+	pub(crate) fn into_inner(self) -> Vec<Segment> { self.segments }
 
 	/// Gets the byte at `index`, or `None` if out of bounds.
-	pub fn get(&self, mut index: usize) -> Option<u8> {
+	pub fn get(&self, mut index: usize) -> Option<&u8> {
 		for data in self.slice_iter() {
 			let len = data.len();
 			if index < len {
-				return Some(data[index])
+				return Some(&data[index])
 			}
 
 			index -= len;
@@ -56,50 +91,19 @@ impl SegSlice<'_> {
 		None
 	}
 
-	/// Iterates over bytes.
-	pub fn iter(&self) -> impl Iterator<Item = u8> {
-		self.slice_iter()
-			.flatten()
-			.cloned()
-	}
-
-	/// Iterates over segments as byte slices.
-	fn slice_iter(&self) -> impl Iterator<Item = &[u8]> {
-		let Self { start, end, slice } = self;
-
-		struct Iter<I> {
-			start: usize,
-			end  : usize,
-			iter : Peekable<I>,
-		}
-
-		impl<'a, I: Iterator<Item = &'a [u8]>> Iterator for Iter<I> {
-			type Item = &'a [u8];
-
-			fn next(&'a mut self) -> Option<Self::Item> {
-				let next = self.iter.next()?;
-				let is_last = self.iter.peek().is_none();
-
-				let start = self.start;
-				self.start = 0;
-
-				Some(
-					if is_last {
-						&next[start..self.end]
-					} else {
-						&next[start..]
-					}
-				)
-			}
-		}
-
-		Iter {
-			start: *start,
-			end  : *end,
-			iter : slice.iter()
-						.map(|seg| seg.mem.data())
-						.peekable()
-		}
+	/// Returns a new slice within `range`.
+	pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Self {
+		let start = match range.start_bound() {
+			Bound::Included(start) => *start,
+			Bound::Excluded(start) => *start + 1,
+			Bound::Unbounded => 0
+		};
+		let end = match range.end_bound() {
+			Bound::Included(end) => *end + 1,
+			Bound::Excluded(end) => *end,
+			Bound::Unbounded => self.len
+		};
+		Self::new(&self.segments, start..end)
 	}
 
 	/// Finds the index of a `byte`.
@@ -107,34 +111,36 @@ impl SegSlice<'_> {
 		self.iter().position(|b| b == byte)
 	}
 
-	/// Finds the byte index of a UTF-8 [`char`], returning `None` if invalid UTF-8
-	/// is encountered.
-	pub fn find_utf8_char(&self, char: char) -> Option<usize> {
-		let mut off = 0;
-		for text in self.decode_utf8() {
-			if let Some(pos) = text.find(char) {
-				return Some(off + pos)
-			}
-
-			off += text.len();
-		}
-		None
+	/// Finds the byte index of a UTF-8 pattern, returning `None` and a UTF-8 error
+	/// (if any) if invalid UTF-8 or the end of the slice is encountered before the
+	/// pattern is found.
+	pub fn find_utf8<'a>(&'a self, pat: impl Pattern<'a> + Clone) -> Option<usize> {
+		let Done(pos) = self.decode_utf8()
+							.fold_while(0, |off, text|
+								if let Some(pos) = text.find(pat.clone()) {
+									Done(off + pos)
+								} else {
+									Continue(off + text.len())
+								}
+							) else { return None };
+		Some(pos)
 	}
 
-	/// Returns a slice up to invalid UTF-8, and the decode error if any.
-	pub fn valid_utf8(&self) -> (Self, Option<Utf8Error>) {
+	/// Returns the exclusive byte index of the last valid UTF-8, and the error, if
+	/// any.
+	pub fn valid_utf8(&self) -> (Self, Option<OffsetUtf8Error>) {
 		let mut end = 0;
-		let mut err = None;
 		for data in self.slice_iter() {
 			if let Err(error) = from_utf8(data) {
-				end += error.valid_up_to();
-				err = Some(error);
-				break
+				return (
+					self.slice(..end + error.valid_up_to()),
+					Some(OffsetUtf8Error::new(error, end))
+				)
 			} else {
 				end += data.len();
 			}
 		}
-		(self[..end], err)
+		(self.slice(..end), None)
 	}
 
 	/// Decodes the slice as UTF-8.
@@ -146,7 +152,8 @@ impl SegSlice<'_> {
 	pub fn decode_utf8(&self) -> impl Iterator<Item = &str> {
 		// Todo: If more bytes are needed to complete a codepoint at the end of
 		//  a segment, this will fail. For ASCII, this will work.
-		self.slice_iter().map(|data| from_utf8(data).expect("invalid UTF-8"))
+		self.slice_iter()
+			.map(|data| from_utf8(data).expect("invalid UTF-8"))
 	}
 
 	/// Copies all bytes into `dst`.
@@ -166,70 +173,75 @@ impl SegSlice<'_> {
 			}
 		}
 	}
+
+	/// Iterates over bytes.
+	pub fn iter(&self) -> impl Iterator<Item = u8> + '_ {
+		self.slice_iter()
+			.flatten()
+			.cloned()
+	}
+
+	/// Iterates over segments as byte slices.
+	fn slice_iter(&self) -> impl Iterator<Item = &[u8]> {
+		self.segments
+			.iter()
+			.map(Segment::data)
+	}
 }
 
-impl IntoIterator for SegSlice<'_> {
-	type Item = u8;
-	type IntoIter = impl Iterator<Item = u8>;
-
-	fn into_iter(self) -> Self::IntoIter { self.iter() }
-}
-
-impl Index<usize> for SegSlice<'_> {
+impl Index<usize> for SegmentSlice {
 	type Output = u8;
 
 	fn index(&self, index: usize) -> &u8 {
-		let Some(ref value) = self.get(index) else {
+		let Some(value) = self.get(index) else {
 			panic!("index {index} out of bounds")
 		};
 		value
 	}
 }
 
-impl Index<Range<usize>> for SegSlice<'_> {
-	type Output = Self;
+#[derive(Copy, Clone, Debug)]
+pub struct OffsetUtf8Error {
+	inner: Utf8Error,
+	offset: usize
+}
 
-	fn index(&self, index: Range<usize>) -> &Self::Output {
-		let (s, e) = if index.is_empty() {
-			(self.end, self.end)
-		} else if !index.contains(&self.len()) {
-			(self.start + index.start, self.start + index.end)
+impl OffsetUtf8Error {
+	fn new(inner: Utf8Error, offset: usize) -> Self {
+		Self { inner, offset }
+	}
+
+	pub fn into_inner(self) -> Utf8Error { self.inner }
+
+	pub fn valid_up_to(&self) -> usize {
+		self.offset + self.inner.valid_up_to()
+	}
+
+	pub fn error_len(&self) -> Option<usize> {
+		self.inner.error_len()
+	}
+}
+
+impl Display for OffsetUtf8Error {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		if let Some(error_len) = self.error_len() {
+			write!(
+				f,
+				"invalid utf-8 sequence of {error_len} bytes from index {}",
+				self.valid_up_to()
+			)
 		} else {
-			panic!("range {index} out of bounds")
-		};
-
-		&SegSlice::new(s, e, self.slice)
+			write!(
+				f,
+				"incomplete utf-8 byte sequence from index {}",
+				self.valid_up_to()
+			)
+		}
 	}
 }
 
-impl Index<RangeTo<usize>> for SegSlice<'_> {
-	type Output = Self;
-
-	fn index(&self, index: RangeTo<usize>) -> &Self::Output {
-		&self[0..index.end]
-	}
-}
-
-impl Index<RangeFrom<usize>> for SegSlice<'_> {
-	type Output = Self;
-
-	fn index(&self, index: RangeFrom<usize>) -> &Self::Output {
-		&self[index.start..self.len()]
-	}
-}
-
-impl Index<RangeInclusive<usize>> for SegSlice<'_> {
-	type Output = Self;
-
-	fn index(&self, index: RangeInclusive<usize>) -> &Self::Output {
-		&self[index.start()..index.end() + 1]
-	}
-}
-
-impl Index<RangeToInclusive<usize>> for SegSlice<'_> {
-	type Output = Self;
-
-	fn index(&self, index: RangeToInclusive<usize>) -> &Self::Output {
-		&self[0..index.end + 1]
+impl Error for OffsetUtf8Error {
+	fn source(&self) -> Option<&(dyn Error + 'static)> {
+		Some(&self.inner)
 	}
 }

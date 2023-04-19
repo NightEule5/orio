@@ -130,14 +130,14 @@ impl Pool for LocalPool {
 	fn claim_one(&self) -> Result<Segment> {
 		Ok(
 			self.get_vec()
-				.map_err(Error::claim_borrow)
+				.map_err(Error::claim_borrow)?
 				.pop()
 				.unwrap_or_default()
 		)
 	}
 
 	fn claim_count(&self, segments: &mut Segments, count: usize) -> Result {
-		let mut vec = self.get_vec().map_err(Error::claim_borrow);
+		let mut vec = self.get_vec().map_err(Error::claim_borrow)?;
 		let len = vec.len();
 		let extra = count - len;
 		segments.extend_empty(
@@ -152,7 +152,7 @@ impl Pool for LocalPool {
 	fn recycle_one(&self, mut segment: Segment) -> Result {
 		segment.clear();
 		self.get_vec()
-			.map_err(Error::recycle_borrow)
+			.map_err(Error::recycle_borrow)?
 			.push(segment);
 		Ok(())
 	}

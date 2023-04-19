@@ -18,7 +18,7 @@ mod seg_slice;
 use std::collections::VecDeque;
 use crate::DEFAULT_SEGMENT_SIZE;
 use crate::pool::{Pool, Result};
-pub use crate::segment::seg_slice::SegSlice;
+pub use crate::segment::seg_slice::*;
 
 /// A group [`Segment`]s contained in a ring buffer, with empty segments pushed to
 /// the back and laden segments in front. To read and write, segments are pushed
@@ -30,11 +30,11 @@ pub struct Segments {
 	ring: VecDeque<Segment>,
 }
 
-impl<const N: usize> Default for Segments {
+impl Default for Segments {
 	fn default() -> Self { Self::new() }
 }
 
-impl<const N: usize> Segments {
+impl Segments {
 	pub fn new() -> Self {
 		Self {
 			len: 0,
@@ -61,8 +61,12 @@ impl<const N: usize> Segments {
 	}
 
 	/// Returns a slice-like view of bytes contains in the segments.
-	pub fn as_slice(&self) -> SegSlice {
-		SegSlice::new(0, self.cnt, &self.ring[..self.len])
+	pub fn as_slice(&self) -> SegmentSlice {
+		let (front, back) = self.ring.as_slices();
+
+		let slice = if front.is_empty() { back } else { front };
+
+		SegmentSlice::new(&slice[..self.len], 0..self.cnt)
 	}
 
 	/// Pops the back-most unfilled [`Segment`] from the ring buffer. Used for
@@ -104,7 +108,7 @@ impl<const N: usize> Segments {
 	/// Recycles all empty segments.
 	pub fn trim<P: Pool>(&mut self, pool: &mut P) -> Result {
 		let range = self.len..self.ring.len();
-		self.lim -= range.len() * N;
+		self.lim -= range.len() * DEFAULT_SEGMENT_SIZE;
 		pool.recycle(self.ring.drain(range))
 	}
 
@@ -132,7 +136,7 @@ impl<const N: usize> Segments {
 			} else if let Some(mut base) = prev.take() {
 				if force || !base.mem.is_shared() {
 					base.shift();
-					base.move_into(&mut curr, N);
+					base.move_into(&mut curr, DEFAULT_SEGMENT_SIZE);
 
 					if base.is_full() {
 						dst.push_back(base);
@@ -148,7 +152,7 @@ impl<const N: usize> Segments {
 				} else if let Some(mut empty) = empty.pop() {
 					// Move the shared memory to an empty segment, drop it, and
 					// insert as the base.
-					empty.move_into(&mut base, N);
+					empty.move_into(&mut base, DEFAULT_SEGMENT_SIZE);
 					let _ = prev.insert(empty);
 				} else {
 					dst.push_back(base);
@@ -160,7 +164,7 @@ impl<const N: usize> Segments {
 		}
 
 		self.len = dst.len();
-		self.lim = dst.back().map_or(0, Segment::lim) + empty.len() * N;
+		self.lim = dst.back().map_or(0, Segment::lim) + empty.len() * DEFAULT_SEGMENT_SIZE;
 		dst.extend(empty);
 		self.ring = dst;
 	}
@@ -177,7 +181,7 @@ impl<const N: usize> Segments {
 	}
 
 	fn push_empty(&mut self, seg: Segment) {
-		self.lim += N;
+		self.lim += DEFAULT_SEGMENT_SIZE;
 		self.ring.push_back(seg);
 	}
 
@@ -243,6 +247,11 @@ impl<const N: usize> Segment<N> {
 	/// Consumes `n` bytes after reading.
 	pub fn consume(&mut self, n: usize) {
 		self.mem.consume(n);
+	}
+
+	/// Truncates to `n` bytes.
+	pub fn truncate(&mut self, n: usize) {
+		self.mem.truncate(n);
 	}
 
 	/// Adds `n` bytes after writing.

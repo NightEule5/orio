@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::cmp::min;
-use std::str::pattern::Pattern;
+use std::ops::RangeBounds;
 use crate::pool::{DefaultPool, Pool};
-use crate::segment::{Segment, Segments, SegSlice};
+use crate::segment::{Segment, Segments, SegmentSlice};
 use crate::streams::{BufSink, BufSource, BufStream, Error, OperationKind, Result, Sink, Source, Stream};
-use crate::streams::OperationKind::{BufFind, BufRead, BufWrite};
+use crate::streams::OperationKind::{BufRead, BufWrite};
 
 pub struct Buffer<P: Pool = DefaultPool> {
 	pool: P,
@@ -25,8 +25,8 @@ pub struct Buffer<P: Pool = DefaultPool> {
 	closed: bool,
 }
 
-impl Default for Buffer {
-	fn default() -> Self { Self::new(DefaultPool::default()) }
+impl<P: Pool + Default> Default for Buffer<P> {
+	fn default() -> Self { Self::new(P::default()) }
 }
 
 impl<Pl: Pool> Buffer<Pl> {
@@ -46,6 +46,7 @@ impl<Pl: Pool> Buffer<Pl> {
 		if !self.closed {
 			self.segments
 				.clear(&mut self.pool)
+				.map_err(Into::into)
 				.map_err(Error::with_op_buf_clear)
 		} else {
 			Ok(())
@@ -55,12 +56,12 @@ impl<Pl: Pool> Buffer<Pl> {
 	/// Copies `byte_count` bytes into `sink`. Memory is either actually copied or
 	/// shared for performance; the tradeoff between wasted space by sharing small
 	/// segments and large, expensive mem-copies is managed by the implementation.
-	pub fn copy_to(&self, sink: &mut Buffer<dyn Pool>, mut byte_count: usize) {
+	pub fn copy_to(&self, sink: &mut Buffer<impl Pool>, mut byte_count: usize) {
 		if byte_count == 0 { return }
 
 		let ref mut dst = sink.segments;
 
-		for seg in self.segments.as_slice().inner() {
+		for seg in self.segments.as_slice().into_inner() {
 			let len = seg.len();
 
 			if len >= byte_count {
@@ -76,27 +77,35 @@ impl<Pl: Pool> Buffer<Pl> {
 	/// Copies all byte into `sink`. Memory is either actually copied or shared for
 	/// performance; the tradeoff between wasted space by sharing small segments and
 	/// large, expensive mem-copies is managed by the implementation.
-	pub fn copy_all_to(&self, sink: &mut Buffer<dyn Pool>) {
+	pub fn copy_all_to(&self, sink: &mut Buffer<impl Pool>) {
 		let ref mut dst = sink.segments;
 
-		for seg in self.segments.as_slice().inner() {
+		for seg in self.segments.as_slice().into_inner() {
 			dst.push(seg.share_all())
 		}
 	}
 
-	/// Returns the index of a `pattern` in the buffer, or `None` if not found.
-	pub fn find<'a, P: Pattern<'a>>(&self, pattern: P) -> Option<usize> {
-		self.require_open(BufFind)?;
-		let (utf8, _) = self.segments.as_slice().valid_utf8();
-		let mut off = 0;
-		for text in utf8.decode_utf8() {
-			if let Some(pos) = text.find(&pattern) {
-				return Some(off + pos)
-			}
+	/// Returns the index of a `char` in the buffer, or `None` if not found or if
+	/// the buffer is closed.
+	pub fn find_utf8_char(&self, char: char) -> Option<usize> {
+		if self.closed { return None }
+		self.segments
+			.as_slice()
+			.find_utf8(char)
+	}
 
-			off += text.len();
-		}
-		None
+	/// Returns the index of a `char` in the buffer within `range`, or `None` if not
+	/// found or if the buffer is closed.
+	pub fn find_utf8_char_in<R: RangeBounds<usize>>(
+		&self,
+		char: char,
+		range: R
+	) -> Option<usize> {
+		if self.closed { return None }
+		self.segments
+			.as_slice()
+			.slice(range)
+			.find_utf8(char)
 	}
 
 	fn require_open(&self, op: OperationKind) -> Result {
@@ -120,15 +129,15 @@ impl<Pl: Pool> Buffer<Pl> {
 		}
 	}
 
-	fn read_segments<R, F: FnOnce(SegSlice) -> Result<usize>>(
+	fn read_segments<F: FnOnce(SegmentSlice) -> Result<usize>>(
 		&mut self,
 		required: usize,
 		read: F
-	) -> Result<R> {
+	) -> Result<usize> {
 		self.require_open(BufRead)?;
 		self.require(required)?;
 		let read_count = read(
-			self.segments.as_slice()[..required]
+			self.segments.as_slice().slice(..required)
 		)?;
 		self.consume(read_count);
 		Ok(read_count)
@@ -169,10 +178,10 @@ impl<P: Pool> Stream for Buffer<P> {
 impl<P: Pool> Source for Buffer<P> {
 	fn read(&mut self, sink: &mut Buffer<impl Pool>, mut count: usize) -> Result<usize> {
 		self.require_open(BufRead)?;
-		let Self { segments, .. } = self;
 		let mut read = 0;
 		count = count.clamp(0, self.count());
 
+		let Self { segments, .. } = self;
 		while count > 0 {
 			let Some(seg) = segments.pop_front() else { break };
 			let len = seg.len();
@@ -204,12 +213,13 @@ impl<P: Pool> Sink for Buffer<P> {
 	}
 
 	fn write_all(&mut self, source: &mut Buffer<impl Pool>) -> Result<usize> {
-		source.read_all(self).map_err(Error::with_op_buf_write)
+		BufSource::read_all(source, self).map_err(Error::with_op_buf_write)
 	}
 }
 
 impl<P: Pool> BufStream for Buffer<P> {
-	fn buf(&mut self) -> &mut Self { self }
+	fn buf(&self) -> &Self { self }
+	fn buf_mut(&mut self) -> &mut Self { self }
 }
 
 macro_rules! gen_int_reads {
@@ -281,8 +291,11 @@ impl<P: Pool> BufSource for Buffer<P> {
 
 	fn read_utf8(&mut self, str: &mut String, byte_count: usize) -> Result<usize> {
 		self.read_segments(byte_count, |seg| {
-			let (utf8, err) = seg.valid_utf8();
-			if let Some(err) = err { err? }
+			let utf8 = {
+				let (valid, err) = seg.valid_utf8();
+				if let Some(err) = err { return Err(Error::invalid_utf8(BufRead, err)) }
+				valid
+			};
 
 			Ok(
 				utf8.decode_utf8()
@@ -298,18 +311,18 @@ impl<P: Pool> BufSource for Buffer<P> {
 		let mut line_term_found = false;
 		self.read_segments(self.count(), |seg| {
 			let (utf8, err) = seg.valid_utf8();
-			let Some(mut pos) = utf8.find_utf8_char('\n') else {
-				if let Some(err) = err {
-					err?
+			let Some(mut pos) = utf8.find_utf8('\n') else {
+				return if let Some(err) = err {
+					Err(Error::invalid_utf8(BufRead, err))
 				} else {
-					let len = seg.len();
+					let len = utf8.len();
 					str.reserve(len);
 
-					for data in seg.decode_utf8() {
+					for data in utf8.decode_utf8() {
 						str.push_str(data)
 					}
 
-					return Ok(len)
+					Ok(len)
 				}
 			};
 
@@ -321,7 +334,7 @@ impl<P: Pool> BufSource for Buffer<P> {
 				n += 1;
 			}
 
-			for data in seg[..pos].decode_utf8() {
+			for data in seg.slice(..pos).decode_utf8() {
 				str.push_str(data)
 			}
 
@@ -377,7 +390,7 @@ impl<P: Pool> BufSink for Buffer<P> {
 		while !value.is_empty() {
 			self.write_segment(|seg|
 				value = &value[seg.push_slice(value)..]
-			)
+			)?;
 		}
 		Ok(())
 	}

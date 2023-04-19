@@ -48,6 +48,11 @@ impl<const N: usize> Loc<N> {
 		}
 	}
 
+	/// Shrinks the location range from the right (truncation).
+	fn shrink_right(&mut self, n: usize) {
+		self.end = self.end.saturating_sub(n);
+	}
+
 	/// Grows the location range from the right (writing).
 	fn grow_right(&mut self, n: usize) {
 		let end = self.end + n;
@@ -154,6 +159,10 @@ impl<const N: usize> MemoryData<N> {
 	
 	fn consume(&mut self, n: usize) {
 		self.bounds.shrink_left(n);
+	}
+
+	fn truncate(&mut self, n: usize) {
+		self.bounds.shrink_right(n);
 	}
 
 	fn add(&mut self, n: usize) {
@@ -353,6 +362,14 @@ impl<const N: usize> Memory<N> {
 			self.get().consume(n);
 		}
 		self.loc.shrink_left(n);
+	}
+
+	/// Truncates to `n` bytes.
+	pub fn truncate(&mut self, n: usize) {
+		if !self.is_shared() {
+			self.get().truncate(n);
+		}
+		self.loc.shrink_right(n);
 	}
 
 	/// Adds `n` bytes after writing.

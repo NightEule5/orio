@@ -16,11 +16,11 @@ use std::error::Error as StdError;
 use std::{io, mem, result};
 use std::cmp::min;
 use amplify_derive::Display;
-use simdutf8::compat::Utf8Error;
 use OperationKind::{BufRead, BufWrite};
 use crate::{Buffer, DEFAULT_SEGMENT_SIZE, error};
 use crate::buffered_wrappers::{buffer_sink, buffer_source};
-use crate::pool::{DefaultPool, Pool, Error as PoolError};
+use crate::pool::{Pool, Error as PoolError};
+use crate::segment::OffsetUtf8Error;
 use crate::streams::ErrorKind::{Closed, Eos, InvalidUTF8, Io, Other};
 use crate::streams::OperationKind::{BufClear, BufFlush};
 
@@ -40,8 +40,6 @@ pub enum OperationKind {
 	BufClear,
 	#[display("flush buffer")]
 	BufFlush,
-	#[display("find in buffer")]
-	BufFind,
 	#[display("{0}")]
 	Other(&'static str)
 }
@@ -80,6 +78,10 @@ impl From<io::Error> for Error {
 	}
 }
 
+impl From<PoolError> for Error {
+	fn from(value: PoolError) -> Self { Self::pool(value) }
+}
+
 impl Error {
 	/// Creates a new "end-of-stream" error.
 	pub fn eos(op: OperationKind) -> Self { Self::new(op, Eos, None) }
@@ -96,11 +98,11 @@ impl Error {
 
 	/// Creates a new segment pool error.
 	pub fn pool(error: PoolError) -> Self {
-		Self::new(error.into(), ErrorKind::Pool, Some(error.into()))
+		Self::new(OperationKind::Unknown, ErrorKind::Pool, Some(error.into()))
 	}
 
 	/// Create a new UTF-8 error.
-	pub fn invalid_utf8(op: OperationKind, error: Utf8Error) -> Self {
+	pub fn invalid_utf8(op: OperationKind, error: OffsetUtf8Error) -> Self {
 		Self::new(op, InvalidUTF8, Some(error.into()))
 	}
 
@@ -110,16 +112,16 @@ impl Error {
 	}
 
 	/// Convenience shorthand for `with_operation(OperationKind::BufRead)`.
-	pub fn with_op_buf_read(mut self) -> Self { self.with_operation(BufRead) }
+	pub fn with_op_buf_read(self) -> Self { self.with_operation(BufRead) }
 
 	/// Convenience shorthand for `with_operation(OperationKind::BufWrite)`.
-	pub fn with_op_buf_write(mut self) -> Self { self.with_operation(BufWrite) }
+	pub fn with_op_buf_write(self) -> Self { self.with_operation(BufWrite) }
 
 	/// Convenience shorthand for `with_operation(OperationKind::BufClear)`.
-	pub fn with_op_buf_clear(mut self) -> Self { self.with_operation(BufClear) }
+	pub fn with_op_buf_clear(self) -> Self { self.with_operation(BufClear) }
 
 	/// Convenience shorthand for `with_operation(OperationKind::BufFlush)`.
-	pub fn with_op_buf_flush(mut self) -> Self { self.with_operation(BufFlush) }
+	pub fn with_op_buf_flush(self) -> Self { self.with_operation(BufFlush) }
 }
 
 /// A data stream, either [`Source`] or [`Sink`]
@@ -183,7 +185,8 @@ pub trait SinkBuffer: Sink + Sized {
 impl<S: Sink> SinkBuffer for S { }
 
 pub trait BufStream {
-	fn buf(&mut self) -> &mut Buffer<dyn Pool>;
+	fn buf(&self) -> &Buffer<impl Pool>;
+	fn buf_mut(&mut self) -> &mut Buffer<impl Pool>;
 }
 
 macro_rules! gen_int_reads {
@@ -198,7 +201,7 @@ macro_rules! gen_int_reads {
 		#[doc = concat!(" Reads one ",$($endian,)?"[`",stringify!($ty),"`] from the source.")]
 		fn $name(&mut self) -> Result<$ty> {
 			self.require(mem::size_of::<$ty>())?;
-			self.buf().$name()
+			self.buf_mut().$name()
 		}
 	}
 }
@@ -236,10 +239,9 @@ pub trait BufSource: BufStream + Source {
 
 	/// Removes `byte_count` bytes from the source.
 	fn skip(&mut self, mut byte_count: usize) -> Result<usize> {
-		let buf = self.buf();
 		let mut n = 0;
-		while byte_count > 0 && self.request(calc_read_count(byte_count, buf))? {
-			let skipped = buf.skip(byte_count)?;
+		while byte_count > 0 && self.request(calc_read_count(byte_count, self.buf()))? {
+			let skipped = self.buf_mut().skip(byte_count)?;
 			n += skipped;
 			byte_count -= skipped;
 		}
@@ -248,10 +250,9 @@ pub trait BufSource: BufStream + Source {
 
 	/// Reads bytes into a slice, returning the number of bytes read.
 	fn read_into_slice(&mut self, mut dst: &mut [u8]) -> Result<usize> {
-		let buf = self.buf();
 		let mut n = 0;
-		while !dst.is_empty() && self.request(calc_read_count(dst.len(), buf))? {
-			let read = buf.read_into_slice(dst);
+		while !dst.is_empty() && self.request(calc_read_count(dst.len(), self.buf()))? {
+			let read = self.buf_mut().read_into_slice(dst)?;
 			n += read;
 			dst = &mut dst[read..];
 		}
@@ -262,11 +263,10 @@ pub trait BufSource: BufStream + Source {
 	/// the slice could not be filled. Bytes are not consumed from the buffer if
 	/// end-of-stream is returned.
 	fn read_into_slice_exact(&mut self, dst: &mut [u8]) -> Result {
-		let buf = self.buf();
 		let len = dst.len();
-		while self.request(len.saturating_sub(buf.count()))? { }
+		while self.request(len.saturating_sub(self.buf().count()))? { }
 
-		buf.read_into_slice_exact(dst)
+		self.buf_mut().read_into_slice_exact(dst)
 	}
 	
 	fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
@@ -285,9 +285,8 @@ pub trait BufSource: BufStream + Source {
 	/// as UTF-8. Returns the number of bytes read.
 	fn read_utf8(&mut self, str: &mut String, mut byte_count: usize) -> Result<usize> {
 		let mut n = 0;
-		let buf = self.buf();
-		while byte_count > 0 && self.request(calc_read_count(byte_count, buf))? {
-			let read = buf.read_utf8(str, byte_count)?;
+		while byte_count > 0 && self.request(calc_read_count(byte_count, self.buf()))? {
+			let read = self.buf_mut().read_utf8(str, byte_count)?;
 			n += read;
 			byte_count -= read;
 		}
@@ -297,9 +296,8 @@ pub trait BufSource: BufStream + Source {
 	/// Reads UTF-8 text into `str` until a line terminator, returning whether the
 	/// terminator was encountered. The line terminator is not written to the string.
 	fn read_utf8_line(&mut self, str: &mut String) -> Result<bool> {
-		let buf = self.buf();
-		while self.request(calc_read_count(usize::MAX, buf))? {
-			if buf.read_utf8_line(str)? {
+		while self.request(calc_read_count(usize::MAX, self.buf()))? {
+			if self.buf_mut().read_utf8_line(str)? {
 				return Ok(true)
 			}
 		}
@@ -307,7 +305,7 @@ pub trait BufSource: BufStream + Source {
 	}
 }
 
-fn calc_read_count(byte_count: usize, buf: &Buffer<dyn Pool>) -> usize {
+fn calc_read_count(byte_count: usize, buf: &Buffer<impl Pool>) -> usize {
 	min(byte_count, DEFAULT_SEGMENT_SIZE.saturating_sub(buf.count()))
 }
 
@@ -322,7 +320,7 @@ macro_rules! gen_int_writes {
 	($name:ident->$ty:ident$($endian:literal)?) => {
 		#[doc = concat!(" Writes one ",$($endian,)?"[`",stringify!($ty),"`] to the source.")]
 		fn $name(&mut self, value: $ty) -> Result {
-			self.buf().$name(value)
+			self.buf_mut().$name(value)
 		}
 	}
 }
@@ -344,10 +342,10 @@ pub trait BufSink: BufStream + Sink {
 	}
 
 	fn write_from_slice(&mut self, value: &[u8]) -> Result {
-		self.buf().write_from_slice(value)
+		self.buf_mut().write_from_slice(value)
 	}
 
 	fn write_utf8(&mut self, value: &str) -> Result {
-		self.buf().write_utf8(value)
+		self.buf_mut().write_utf8(value)
 	}
 }

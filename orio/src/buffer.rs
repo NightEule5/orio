@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::cmp::min;
+use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
 use crate::pool::{DefaultPool, Pool};
 use crate::segment::{Segment, Segments, SegmentSlice};
@@ -27,6 +29,15 @@ pub struct Buffer<P: Pool = DefaultPool> {
 
 impl<P: Pool + Default> Default for Buffer<P> {
 	fn default() -> Self { Self::new(P::default()) }
+}
+
+impl<P: Pool> Debug for Buffer<P> {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		f.debug_struct("Buffer")
+			.field("segments", &self.segments)
+			.field("closed", &self.closed)
+			.finish_non_exhaustive()
+	}
 }
 
 impl<Pl: Pool> Buffer<Pl> {
@@ -342,6 +353,28 @@ impl<P: Pool> BufSource for Buffer<P> {
 			Ok(n)
 		})?;
 		Ok(line_term_found)
+	}
+
+	fn read_utf8_into_slice(&mut self, mut str: &mut str) -> Result<usize> {
+		self.read_segments(str.len(), move |mut seg| {
+			let len = min(str.len(), seg.len());
+			seg = seg.slice(..len);
+			let utf8 = {
+				let (valid, err) = seg.valid_utf8();
+				if let Some(err) = err { return Err(Error::invalid_utf8(BufRead, err)) }
+				valid
+			};
+			str = &mut str[..utf8.len()];
+
+			unsafe {
+				for text in utf8.decode_utf8() {
+					let bytes = str.as_bytes_mut();
+					bytes.copy_from_slice(text.as_bytes());
+					str = &mut str[text.len()..];
+				}
+			}
+			Ok(utf8.len())
+		})
 	}
 }
 

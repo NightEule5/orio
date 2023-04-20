@@ -19,10 +19,13 @@ use amplify_derive::Display;
 use OperationKind::{BufRead, BufWrite};
 use crate::{Buffer, DEFAULT_SEGMENT_SIZE, error};
 use crate::buffered_wrappers::{buffer_sink, buffer_source};
-use crate::pool::{Pool, Error as PoolError};
+use crate::pool::{Error as PoolError, Pool};
 use crate::segment::OffsetUtf8Error;
+use crate::streams::codec::{Decode, Encode};
 use crate::streams::ErrorKind::{Closed, Eos, InvalidUTF8, Io, Other};
 use crate::streams::OperationKind::{BufClear, BufFlush};
+
+pub mod codec;
 
 pub type Error = error::Error<OperationKind, ErrorKind>;
 pub type Result<T = ()> = result::Result<T, Error>;
@@ -224,6 +227,14 @@ pub trait BufSource: BufStream + Source {
 
 	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize>;
 
+	fn read_into(&mut self, value: &mut impl Decode, byte_count: usize) -> Result<usize> {
+		value.decode(self.buf_mut(), byte_count, false)
+	}
+
+	fn read_into_le(&mut self, value: &mut impl Decode, byte_count: usize) -> Result<usize> {
+		value.decode(self.buf_mut(), byte_count, true)
+	}
+
 	gen_int_reads! {
 		read_i8 -> i8,
 		read_u8 -> u8,
@@ -303,6 +314,17 @@ pub trait BufSource: BufStream + Source {
 		}
 		Ok(false)
 	}
+
+	/// Reads UTF-8 text into a string slice, returning the number of bytes read.
+	fn read_utf8_into_slice(&mut self, mut str: &mut str) -> Result<usize> {
+		let mut n = 0;
+		while str.len() > 0 && self.request(calc_read_count(str.len(), self.buf()))? {
+			let read = self.buf_mut().read_utf8_into_slice(str)?;
+			n += read;
+			str = &mut str[read..];
+		}
+		Ok(n)
+	}
 }
 
 fn calc_read_count(byte_count: usize, buf: &Buffer<impl Pool>) -> usize {
@@ -327,6 +349,14 @@ macro_rules! gen_int_writes {
 
 pub trait BufSink: BufStream + Sink {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize>;
+
+	fn write_from(&mut self, value: impl Encode) -> Result<usize> {
+		value.encode(self.buf_mut(), false)
+	}
+
+	fn write_from_le(&mut self, value: impl Encode) -> Result<usize> {
+		value.encode(self.buf_mut(), true)
+	}
 
 	gen_int_writes! {
 		write_i8 -> i8,

@@ -52,6 +52,7 @@
 #![allow(incomplete_features)]
 #![feature(
 	associated_type_defaults,
+	generic_const_exprs,
 	get_mut_unchecked,
 	pattern,
 	return_position_impl_trait_in_trait,
@@ -59,8 +60,6 @@
 	thread_local,
 	type_alias_impl_trait,
 )]
-
-extern crate core;
 
 mod segment;
 mod pool;

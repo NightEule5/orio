@@ -23,6 +23,7 @@ pub use crate::segment::seg_slice::*;
 /// A group [`Segment`]s contained in a ring buffer, with empty segments pushed to
 /// the back and laden segments in front. To read and write, segments are pushed
 /// and popped from the ring buffer.
+#[derive(Debug)]
 pub struct Segments {
 	len: usize,
 	lim: usize,
@@ -191,12 +192,13 @@ impl Segments {
 		self.lim += seg.lim();
 		self.lim -= cur_lim;
 
-		self.len += 1;
 		self.ring.insert(self.len, seg);
+		self.len += 1;
 	}
 }
 
 /// A fixed-size buffer segment.
+#[derive(Debug)]
 pub struct Segment<const N: usize = DEFAULT_SEGMENT_SIZE> {
 	mem: memory::Memory<N>,
 }

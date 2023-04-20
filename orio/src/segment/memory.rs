@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 // Location
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Loc<const N: usize> {
 	start: usize,
 	end: usize,
@@ -74,7 +74,7 @@ impl<const N: usize> Loc<N> {
 }
 
 impl<const N: usize> Default for Loc<N> {
-	fn default() -> Self { Self::new(0, N) }
+	fn default() -> Self { Self::new(0, 0) }
 }
 
 impl<const N: usize> From<Range<usize>> for Loc<N> {
@@ -139,7 +139,7 @@ impl<const N: usize> RangeBounds<usize> for Loc<N> {
 
 // Memory
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct MemoryData<const N: usize> {
 	data: Pin<Box<[u8; N]>>,
 	/// The bounds of written data. Can only be modified for owned memory, because
@@ -226,7 +226,7 @@ impl<const N: usize> IndexMut<Range<usize>> for MemoryData<N> {
 /// when shared, directly mutable when fully-owned. This way, expensive copies can
 /// be avoided as much as possible; simple IO between buffers is almost zero-cost.
 /// In addition, memory is pinned to the heap to avoid moves.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Memory<const N: usize> {
 	data: Rc<MemoryData<N>>,
 	loc: Loc<N>,
@@ -254,7 +254,7 @@ impl<const N: usize> Memory<N> {
 	pub fn len(&self) -> usize { self.loc.len() }
 
 	/// Returns the limit of this memory, the number of bytes that can be written.
-	pub fn lim(&self) -> usize { N - self.off_end() }
+	pub fn lim(&self) -> usize { N - self.end() }
 
 	/// Shares all of this memory.
 	pub fn share_all(&self) -> Self { self.clone() }

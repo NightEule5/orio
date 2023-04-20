@@ -119,7 +119,7 @@ cfg_if! {
 }
 
 #[thread_local]
-static LOCAL_POOL: Lazy<LocalPool> = Lazy::new(|| LocalPool::default());
+static LOCAL_POOL: Lazy<LocalPool> = Lazy::new(LocalPool::new);
 
 #[derive(Clone)]
 pub struct LocalPool {
@@ -180,6 +180,10 @@ impl Pool for LocalPool {
 }
 
 impl LocalPool {
+	fn new() -> Self {
+		Self { segments: Rc::new(RefCell::default()) }
+	}
+
 	fn get_vec(&self) -> Result<RefMut<'_, Vec<Segment>>, ErrorBox> {
 		Ok(self.segments.try_borrow_mut()?)
 	}

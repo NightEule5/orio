@@ -66,7 +66,7 @@ mod pool;
 mod buffer;
 mod buffered_wrappers;
 mod error;
-mod streams;
+pub mod streams;
 mod util;
 
 pub use error::*;

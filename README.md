@@ -21,15 +21,17 @@ The `Buffer` struct is a mutable byte buffer, containing a vector of segments. I
 ```rust
 use orio::{Buffer, Source, BufSource};
 
-fn main() {
-	let mut buf_a = Buffer::try_from("Hello world!").unwrap();
+fn main() -> orio::Result {
+	let mut buf_a = Buffer::from_utf8("Hello world!")?;
 	let mut buf_b = Buffer::new();
 	
-	let count: usize = buf_b.read(buf_a, 5).unwrap();
+	let count: usize = buf_b.read(buf_a, 5)?;
 	assert_eq!(count, 5);
 	
-	let str_a: String = buf_a.read_all().unwrap();
-	let str_b: String = buf_b.read_all().unwrap();
+	let str_a = String::new();
+	let str_b = String::new();
+	buf_a.read_utf8(&mut str_a)?;
+	buf_b.read_utf8(&mut str_b)?;
 	assert_eq!(str_a, " world!");
 	assert_eq!(str_b, "Hello");
 }
@@ -47,15 +49,17 @@ Sources implement `read`:
 
 ```rust
 use orio::{Buffer, Source};
+use orio::pool::Pool;
 
 struct MySource {
 	data: String
 }
 
 impl Source for MySource {
-	type Error = orio::Error;
-	fn read(&mut self, buffer: Buffer, count: usize) -> orio::Result {
-		buffer.write_from(&mut self.data, count)
+	fn read(&mut self, buffer: &mut Buffer<impl Pool>, count: usize) -> orio::Result {
+		buffer.write_utf8(&self.data, count)?;
+		data.clear();
+		Ok(())
 	}
 }
 ```
@@ -64,15 +68,15 @@ Sinks implement `write`:
 
 ```rust
 use orio::{Buffer, Sink};
+use orio::pool::Pool;
 
 struct MySink {
 	data: String
 }
 
 impl Sink for MySink {
-	type Error = orio::Error;
-	fn write(&mut self, buffer: Buffer, count: usize) -> orio::Result {
-		buffer.read_from(&mut self.data, count)
+	fn write(&mut self, buffer: &mut Buffer<impl Pool>, count: usize) -> orio::Result {
+		buffer.read_all_utf8(&mut self.data, count)
 	}
 }
 ```

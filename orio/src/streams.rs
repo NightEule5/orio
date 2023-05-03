@@ -13,17 +13,18 @@
 // limitations under the License.
 
 use std::error::Error as StdError;
-use std::{io, mem, result};
+use std::{fmt, io, mem, result};
 use std::cmp::min;
+use std::fmt::{Display, Formatter};
 use amplify_derive::Display;
+use simdutf8::compat::Utf8Error;
 use OperationKind::{BufRead, BufWrite};
-use crate::{Buffer, DEFAULT_SEGMENT_SIZE, error};
+use crate::{Buffer, error, SEGMENT_SIZE};
 use crate::buffered_wrappers::{buffer_sink, buffer_source};
-use crate::pool::{Error as PoolError, Pool};
-use crate::segment::OffsetUtf8Error;
+use crate::pool::{Error as PoolError, SharedPool};
 use crate::streams::codec::{Decode, Encode};
 use crate::streams::ErrorKind::{Closed, Eos, InvalidUTF8, Io, Other};
-use crate::streams::OperationKind::{BufClear, BufFlush};
+use crate::streams::OperationKind::{BufClear, BufCompact, BufCopy, BufFlush};
 
 pub mod codec;
 
@@ -39,10 +40,14 @@ pub enum OperationKind {
 	BufRead,
 	#[display("write to buffer")]
 	BufWrite,
+	#[display("copy buffer")]
+	BufCopy,
 	#[display("clear buffer")]
 	BufClear,
 	#[display("flush buffer")]
 	BufFlush,
+	#[display("compact buffer")]
+	BufCompact,
 	#[display("{0}")]
 	Other(&'static str)
 }
@@ -120,11 +125,17 @@ impl Error {
 	/// Convenience shorthand for `with_operation(OperationKind::BufWrite)`.
 	pub fn with_op_buf_write(self) -> Self { self.with_operation(BufWrite) }
 
+	/// Convenience shorthand for `with_operation(OperationKind::BufCopy)`.
+	pub fn with_op_buf_copy(self) -> Self { self.with_operation(BufCopy) }
+
 	/// Convenience shorthand for `with_operation(OperationKind::BufClear)`.
 	pub fn with_op_buf_clear(self) -> Self { self.with_operation(BufClear) }
 
 	/// Convenience shorthand for `with_operation(OperationKind::BufFlush)`.
 	pub fn with_op_buf_flush(self) -> Self { self.with_operation(BufFlush) }
+
+	/// Convenience shorthand for `with_operation(OperationKind::BufCompact)`.
+	pub fn with_op_buf_compact(self) -> Self { self.with_operation(BufCompact) }
 }
 
 /// A data stream, either [`Source`] or [`Sink`]
@@ -138,18 +149,18 @@ pub trait Stream {
 /// A data source.
 pub trait Source: Stream {
 	/// Reads `count` bytes from the source into the buffer.
-	fn read(&mut self, sink: &mut Buffer<impl Pool>, count: usize) -> Result<usize>;
+	fn read(&mut self, sink: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize>;
 
 	/// Reads all bytes from the source into the buffer.
 	#[inline]
-	fn read_all(&mut self, sink: &mut Buffer<impl Pool>) -> Result<usize> {
+	fn read_all(&mut self, sink: &mut Buffer<impl SharedPool>) -> Result<usize> {
 		self.read(sink, usize::MAX)
 	}
 }
 
 pub trait SourceBuffer: Source + Sized {
 	/// Wrap the source in a buffered source.
-	fn buffer<P: Pool + Default>(self) -> impl BufSource { buffer_source::<_, P>(self) }
+	fn buffer(self) -> impl BufSource { buffer_source(self) }
 }
 
 impl<S: Source> SourceBuffer for S { }
@@ -159,13 +170,16 @@ pub trait Sink: Stream {
 	/// Writes `count` bytes from the buffer into the sink.
 	fn write(
 		&mut self,
-		source: &mut Buffer<impl Pool>,
+		source: &mut Buffer<impl SharedPool>,
 		count: usize
 	) -> Result<usize>;
 
 	/// Writes all bytes from the buffer into the sink.
 	#[inline]
-	fn write_all(&mut self, source: &mut Buffer<impl Pool>) -> Result<usize> {
+	fn write_all(
+		&mut self,
+		source: &mut Buffer<impl SharedPool>
+	) -> Result<usize> {
 		self.write(source, source.count())
 	}
 
@@ -182,14 +196,14 @@ impl<S: Sink> Stream for S {
 
 pub trait SinkBuffer: Sink + Sized {
 	/// Wrap the sink in a buffered sink.
-	fn buffer<P: Pool + Default>(self) -> impl BufSink { buffer_sink::<_, P>(self) }
+	fn buffer(self) -> impl BufSink { buffer_sink(self) }
 }
 
 impl<S: Sink> SinkBuffer for S { }
 
-pub trait BufStream {
-	fn buf(&self) -> &Buffer<impl Pool>;
-	fn buf_mut(&mut self) -> &mut Buffer<impl Pool>;
+pub trait BufStream: Stream {
+	fn buf(&self) -> &Buffer<impl SharedPool>;
+	fn buf_mut(&mut self) -> &mut Buffer<impl SharedPool>;
 }
 
 macro_rules! gen_int_reads {
@@ -228,11 +242,11 @@ pub trait BufSource: BufStream + Source {
 	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize>;
 
 	fn read_into(&mut self, value: &mut impl Decode, byte_count: usize) -> Result<usize> {
-		value.decode(self.buf_mut(), byte_count, false)
+		value.decode::<SEGMENT_SIZE>(self.buf_mut(), byte_count, false)
 	}
 
 	fn read_into_le(&mut self, value: &mut impl Decode, byte_count: usize) -> Result<usize> {
-		value.decode(self.buf_mut(), byte_count, true)
+		value.decode::<SEGMENT_SIZE>(self.buf_mut(), byte_count, true)
 	}
 
 	gen_int_reads! {
@@ -327,8 +341,8 @@ pub trait BufSource: BufStream + Source {
 	}
 }
 
-fn calc_read_count(byte_count: usize, buf: &Buffer<impl Pool>) -> usize {
-	min(byte_count, DEFAULT_SEGMENT_SIZE.saturating_sub(buf.count()))
+fn calc_read_count(byte_count: usize, buf: &Buffer<impl SharedPool>) -> usize {
+	min(byte_count, SEGMENT_SIZE.saturating_sub(buf.count()))
 }
 
 macro_rules! gen_int_writes {
@@ -351,11 +365,11 @@ pub trait BufSink: BufStream + Sink {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize>;
 
 	fn write_from(&mut self, value: impl Encode) -> Result<usize> {
-		value.encode(self.buf_mut(), false)
+		value.encode::<SEGMENT_SIZE>(self.buf_mut(), false)
 	}
 
 	fn write_from_le(&mut self, value: impl Encode) -> Result<usize> {
-		value.encode(self.buf_mut(), true)
+		value.encode::<SEGMENT_SIZE>(self.buf_mut(), true)
 	}
 
 	gen_int_writes! {
@@ -377,5 +391,51 @@ pub trait BufSink: BufStream + Sink {
 
 	fn write_utf8(&mut self, value: &str) -> Result {
 		self.buf_mut().write_utf8(value)
+	}
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct OffsetUtf8Error {
+	inner: Utf8Error,
+	offset: usize
+}
+
+impl OffsetUtf8Error {
+	pub(crate) fn new(inner: Utf8Error, offset: usize) -> Self {
+		Self { inner, offset }
+	}
+
+	pub fn into_inner(self) -> Utf8Error { self.inner }
+
+	pub fn valid_up_to(&self) -> usize {
+		self.offset + self.inner.valid_up_to()
+	}
+
+	pub fn error_len(&self) -> Option<usize> {
+		self.inner.error_len()
+	}
+}
+
+impl Display for OffsetUtf8Error {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		if let Some(error_len) = self.error_len() {
+			write!(
+				f,
+				"invalid utf-8 sequence of {error_len} bytes from index {}",
+				self.valid_up_to()
+			)
+		} else {
+			write!(
+				f,
+				"incomplete utf-8 byte sequence from index {}",
+				self.valid_up_to()
+			)
+		}
+	}
+}
+
+impl StdError for OffsetUtf8Error {
+	fn source(&self) -> Option<&(dyn StdError + 'static)> {
+		Some(&self.inner)
 	}
 }

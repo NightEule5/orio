@@ -13,20 +13,17 @@
 // limitations under the License.
 
 use ErrorKind::Eos;
-use crate::{Buffer, DEFAULT_SEGMENT_SIZE};
-use crate::pool::Pool;
+use crate::Buffer;
+use crate::pool::SharedPool;
 use crate::streams::{Sink, Source, Stream, Result, BufStream, BufSource, Error, BufSink, ErrorKind};
 use crate::streams::OperationKind::{BufFlush, BufRead};
+use crate::segment::SIZE;
 
-pub fn buffer_source<S: Source, P: Pool + Default>(source: S) -> BufferedSource<S, P> {
-	BufferedSource {
-		buffer: Buffer::default(),
-		source,
-		closed: false,
-	}
+pub fn buffer_source<S: Source>(source: S) -> BufferedSource<S> {
+	BufferedSource::new(source)
 }
 
-pub fn buffer_sink<S: Sink, P: Pool + Default>(sink: S) -> BufferedSink<S, P> {
+pub fn buffer_sink<S: Sink>(sink: S) -> BufferedSink<S> {
 	BufferedSink {
 		buffer: Buffer::default(),
 		sink,
@@ -34,19 +31,28 @@ pub fn buffer_sink<S: Sink, P: Pool + Default>(sink: S) -> BufferedSink<S, P> {
 	}
 }
 
-pub struct BufferedSource<S: Source, P: Pool> {
-	buffer: Buffer<P>,
+pub struct BufferedSource<S: Source> {
+	buffer: Buffer,
 	source: S,
 	closed: bool,
 }
 
-impl<S: Source, P: Pool> BufferedSource<S, P> {
+impl<S: Source> BufferedSource<S> {
+	fn new(source: S) -> Self {
+		Self {
+			buffer: Buffer::default(),
+			source,
+			closed: false,
+		}
+	}
+}
+
+impl<S: Source> BufferedSource<S> {
 	/// Fills the buffer, rounding up to the nearest segment size.
 	fn fill_buf(&mut self, mut byte_count: usize) -> Result<bool> {
-		const SEG_SIZE: usize = DEFAULT_SEGMENT_SIZE;
 		let count = self.buffer.count();
-		let seg_count = (count + byte_count + SEG_SIZE - 1) / SEG_SIZE;
-		byte_count = seg_count * SEG_SIZE - count;
+		let seg_count = (count + byte_count + SIZE - 1) / SIZE;
+		byte_count = seg_count * SIZE - count;
 
 		let cnt = self.source
 					  .read(&mut self.buffer, byte_count)
@@ -59,7 +65,7 @@ impl<S: Source, P: Pool> BufferedSource<S, P> {
 	}
 }
 
-impl<S: Source, P: Pool> Stream for BufferedSource<S, P> {
+impl<S: Source> Stream for BufferedSource<S> {
 	fn close(&mut self) -> Result {
 		if !self.closed {
 			self.closed = true;
@@ -73,8 +79,8 @@ impl<S: Source, P: Pool> Stream for BufferedSource<S, P> {
 	}
 }
 
-impl<S: Source, P: Pool> Source for BufferedSource<S, P> {
-	fn read(&mut self, buffer: &mut Buffer<impl Pool>, byte_count: usize) -> Result<usize> {
+impl<S: Source> Source for BufferedSource<S> {
+	fn read(&mut self, buffer: &mut Buffer<impl SharedPool>, byte_count: usize) -> Result<usize> {
 		if self.closed { return Err(Error::closed(BufRead)) }
 
 		self.request(byte_count)?;
@@ -82,12 +88,12 @@ impl<S: Source, P: Pool> Source for BufferedSource<S, P> {
 	}
 }
 
-impl<S: Source, P: Pool> BufStream for BufferedSource<S, P> {
-	fn buf(&self) -> &Buffer<impl Pool> { &self.buffer }
-	fn buf_mut(&mut self) -> &mut Buffer<impl Pool> { &mut self.buffer }
+impl<S: Source> BufStream for BufferedSource<S> {
+	fn buf(&self) -> &Buffer { &self.buffer }
+	fn buf_mut(&mut self) -> &mut Buffer { &mut self.buffer }
 }
 
-impl<S: Source, P: Pool> BufSource for BufferedSource<S, P> {
+impl<S: Source> BufSource for BufferedSource<S> {
 	fn request(&mut self, byte_count: usize) -> Result<bool> {
 		if self.closed { return Ok(false) }
 
@@ -98,25 +104,25 @@ impl<S: Source, P: Pool> BufSource for BufferedSource<S, P> {
 		self.fill_buf(byte_count)
 	}
 
-	fn read_all(&mut self, mut sink: &mut impl Sink) -> Result<usize> {
+	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize> {
 		sink.write_all(self.buf_mut())
 			.map_err(Error::with_op_buf_read)
 	}
 }
 
-impl<S: Source, P: Pool> Drop for BufferedSource<S, P> {
+impl<S: Source> Drop for BufferedSource<S> {
 	fn drop(&mut self) {
 		let _ = self.close();
 	}
 }
 
-pub struct BufferedSink<S: Sink, P: Pool> {
-	buffer: Buffer<P>,
+pub struct BufferedSink<S: Sink> {
+	buffer: Buffer,
 	sink: S,
 	closed: bool,
 }
 
-impl<S: Sink, P: Pool> Stream for BufferedSink<S, P> {
+impl<S: Sink> Stream for BufferedSink<S> {
 	fn close(&mut self) -> Result {
 		if !self.closed {
 			self.closed = true;
@@ -130,8 +136,8 @@ impl<S: Sink, P: Pool> Stream for BufferedSink<S, P> {
 	}
 }
 
-impl<S: Sink, P: Pool> Sink for BufferedSink<S, P> {
-	fn write(&mut self, buffer: &mut Buffer<impl Pool>, byte_count: usize) -> Result<usize> {
+impl<S: Sink> Sink for BufferedSink<S> {
+	fn write(&mut self, buffer: &mut Buffer<impl SharedPool>, byte_count: usize) -> Result<usize> {
 		let cnt = self.buffer.write(buffer, byte_count)?;
 		self.flush()?;
 		Ok(cnt)
@@ -155,19 +161,19 @@ impl<S: Sink, P: Pool> Sink for BufferedSink<S, P> {
 	}
 }
 
-impl<S: Sink, P: Pool> BufStream for BufferedSink<S, P> {
-	fn buf(&self) -> &Buffer<impl Pool> { &self.buffer }
-	fn buf_mut(&mut self) -> &mut Buffer<impl Pool> { &mut self.buffer }
+impl<S: Sink> BufStream for BufferedSink<S> {
+	fn buf(&self) -> &Buffer { &self.buffer }
+	fn buf_mut(&mut self) -> &mut Buffer { &mut self.buffer }
 }
 
-impl<S: Sink, P: Pool> BufSink for BufferedSink<S, P> {
+impl<S: Sink> BufSink for BufferedSink<S> {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
 		source.read_all(self.buf_mut())
 			  .map_err(Error::with_op_buf_write)
 	}
 }
 
-impl<S: Sink, P: Pool> Drop for BufferedSink<S, P> {
+impl<S: Sink> Drop for BufferedSink<S> {
 	fn drop(&mut self) {
 		let _ = self.close();
 	}

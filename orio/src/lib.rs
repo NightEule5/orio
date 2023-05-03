@@ -35,9 +35,9 @@
 //! and written to the other, claiming new segments from the pool as it fills. Data
 //! can have gaps where some segments are not filled or partially read, called *voids*.
 //! Compacting these on every write could be costly, but keeping them is less space
-//! efficient. To fix this, as void size reaches a threshold, 4096B by default, all
-//! segments are compacted. This can also be triggered manually with the `compact`
-//! function.
+//! efficient which would lead to more allocations. As void size reaches a threshold,
+//! 4096B by default, all segments are compacted. This can also be triggered manually
+//! with the `compact` function.
 //!
 //! As the segments are consumed, empty segments may be returned to the pool. Some
 //! ratio of empty segments to full segments, the *retention ratio*, are kept for
@@ -51,26 +51,27 @@
 
 #![allow(incomplete_features)]
 #![feature(
+associated_type_bounds,
 	associated_type_defaults,
+	drain_filter,
+	extend_one,
 	generic_const_exprs,
-	get_mut_unchecked,
-	pattern,
 	return_position_impl_trait_in_trait,
+	slice_range,
 	specialization,
 	thread_local,
 	type_alias_impl_trait,
 )]
 
-mod segment;
-mod pool;
 mod buffer;
 mod buffered_wrappers;
 mod error;
 pub mod streams;
+mod segment;
+mod element;
+pub mod pool;
 mod util;
 
 pub use error::*;
-pub(crate) use segment::*;
 pub use buffer::*;
-
-pub(crate) const DEFAULT_SEGMENT_SIZE: usize = 8 * 1024;
+pub use segment::{Segment, SIZE as SEGMENT_SIZE};

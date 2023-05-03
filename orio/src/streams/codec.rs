@@ -17,7 +17,7 @@
 use std::cmp::min;
 use std::mem;
 use crate::Buffer;
-use crate::pool::Pool;
+use crate::pool::SharedPool;
 use crate::streams::{BufSink, BufSource, Result};
 
 /// Defines encoding behavior for fixed-size types.
@@ -31,7 +31,7 @@ pub trait EncodeFixed: Sized {
 /// Defines encoding behavior.
 pub trait Encode {
 	/// Encodes into `buf`, in little-endian byte order if `le` is `true`.
-	fn encode(self, buf: &mut Buffer<impl Pool>, le: bool) -> Result<usize>;
+	fn encode<const N: usize>(self, buf: &mut Buffer<impl SharedPool>, le: bool) -> Result<usize>;
 }
 
 /// Defines decoding behavior for fixed-size types.
@@ -47,18 +47,18 @@ pub trait DecodeFixed: Sized {
 pub trait Decode {
 	/// Decodes at most `byte_count` bytes from `buf`, in little-endian byte order
 	/// if `le` is `true`.
-	fn decode(&mut self, buf: &mut Buffer<impl Pool>, byte_count: usize, le: bool) -> Result<usize>;
+	fn decode<const N: usize>(&mut self, buf: &mut Buffer<impl SharedPool>, byte_count: usize, le: bool) -> Result<usize>;
 }
 
 default impl<E: EncodeFixed> Encode for E where [(); Self::SIZE]: {
-	fn encode(self, buf: &mut Buffer<impl Pool>, le: bool) -> Result<usize> {
+	fn encode<const N: usize>(self, buf: &mut Buffer<impl SharedPool>, le: bool) -> Result<usize> {
 		buf.write_from_slice(&self.encode_to_bytes(le))?;
 		Ok(Self::SIZE)
 	}
 }
 
 default impl<D: DecodeFixed> Decode for D where [(); Self::SIZE]: {
-	fn decode(&mut self, buf: &mut Buffer<impl Pool>, byte_count: usize, le: bool) -> Result<usize> {
+	fn decode<const N: usize>(&mut self, buf: &mut Buffer<impl SharedPool>, byte_count: usize, le: bool) -> Result<usize> {
 		let mut arr = [0; Self::SIZE];
 		let len = min(byte_count, Self::SIZE);
 		buf.read_into_slice_exact(&mut arr[..len])?;
@@ -71,7 +71,7 @@ default impl<D: DecodeFixed> Decode for D where [(); Self::SIZE]: {
 // Bytes
 
 impl Encode for &[u8] {
-	fn encode(self, buf: &mut Buffer<impl Pool>, _: bool) -> Result<usize> {
+	fn encode<const N: usize>(self, buf: &mut Buffer<impl SharedPool>, _: bool) -> Result<usize> {
 		let len = self.len();
 		buf.write_from_slice(self)?;
 		Ok(len)
@@ -79,7 +79,7 @@ impl Encode for &[u8] {
 }
 
 impl Decode for [u8] {
-	fn decode(&mut self, buf: &mut Buffer<impl Pool>, byte_count: usize, _: bool) -> Result<usize> {
+	fn decode<const N: usize>(&mut self, buf: &mut Buffer<impl SharedPool>, byte_count: usize, _: bool) -> Result<usize> {
 		let len = min(byte_count, self.len());
 		buf.read_into_slice(&mut self[..len])
 	}
@@ -88,7 +88,7 @@ impl Decode for [u8] {
 // Utf8
 
 impl Encode for &str {
-	fn encode(self, buf: &mut Buffer<impl Pool>, _: bool) -> Result<usize> {
+	fn encode<const N: usize>(self, buf: &mut Buffer<impl SharedPool>, _: bool) -> Result<usize> {
 		let n = self.len();
 		buf.write_utf8(self)?;
 		Ok(n)
@@ -96,14 +96,14 @@ impl Encode for &str {
 }
 
 impl Decode for str {
-	fn decode(&mut self, buf: &mut Buffer<impl Pool>, byte_count: usize, _: bool) -> Result<usize> {
+	fn decode<const N: usize>(&mut self, buf: &mut Buffer<impl SharedPool>, byte_count: usize, _: bool) -> Result<usize> {
 		let len = min(byte_count, self.len());
 		buf.read_utf8_into_slice(&mut self[..len])
 	}
 }
 
 impl Encode for String {
-	fn encode(self, buf: &mut Buffer<impl Pool>, _: bool) -> Result<usize> {
+	fn encode<const N: usize>(self, buf: &mut Buffer<impl SharedPool>, _: bool) -> Result<usize> {
 		let n = self.len();
 		buf.write_utf8(&*self)?;
 		Ok(n)
@@ -111,7 +111,7 @@ impl Encode for String {
 }
 
 impl Decode for String {
-	fn decode(&mut self, buf: &mut Buffer<impl Pool>, byte_count: usize, _: bool) -> Result<usize> {
+	fn decode<const N: usize>(&mut self, buf: &mut Buffer<impl SharedPool>, byte_count: usize, _: bool) -> Result<usize> {
 		buf.read_utf8(self, byte_count)
 	}
 }
@@ -140,7 +140,7 @@ macro_rules! gen_num_codec {
 			}
 		}
 		impl Encode for $ty {
-			fn encode(self, buf: &mut Buffer<impl Pool>, le: bool) -> Result<usize> {
+			fn encode<const N: usize>(self, buf: &mut Buffer<impl SharedPool>, le: bool) -> Result<usize> {
 				if le {
 					buf.$wfn_le(self)?;
 				} else {
@@ -150,7 +150,7 @@ macro_rules! gen_num_codec {
 			}
 		}
 		impl Decode for $ty {
-			fn decode(&mut self, buf: &mut Buffer<impl Pool>, byte_count: usize, le: bool) -> Result<usize> {
+			fn decode<const N: usize>(&mut self, buf: &mut Buffer<impl SharedPool>, byte_count: usize, le: bool) -> Result<usize> {
 				if byte_count <= mem::size_of::<$ty>() {
 					return Ok(0)
 				}
@@ -172,13 +172,13 @@ macro_rules! gen_num_codec {
 			fn decode_from_bytes([byte]: [u8; 1], _: bool) -> Result<$ty> { Ok(byte as $ty) }
 		}
 		impl Encode for $ty {
-			fn encode(self, buf: &mut Buffer<impl Pool>, _: bool) -> Result<usize> {
+			fn encode<const N: usize>(self, buf: &mut Buffer<impl SharedPool>, _: bool) -> Result<usize> {
 				buf.$wfn(self)?;
 				Ok(1)
 			}
 		}
 		impl Decode for $ty {
-			fn decode(&mut self, buf: &mut Buffer<impl Pool>, byte_count: usize, _: bool) -> Result<usize> {
+			fn decode<const N: usize>(&mut self, buf: &mut Buffer<impl SharedPool>, byte_count: usize, _: bool) -> Result<usize> {
 				if byte_count == 0 { return Ok(0) }
 
 				*self = buf.$rfn()?;

@@ -12,343 +12,254 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::min;
-use std::collections::Bound;
-use std::ops::{Add, Index, IndexMut, Range, RangeBounds, RangeFrom, RangeFull, RangeTo, SubAssign};
+use std::cmp::{max, min};
+use std::ops::Range;
 use std::pin::Pin;
 use std::rc::Rc;
+use crate::element::StreamElement;
 
-// Location
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct Loc<const N: usize> {
-	start: usize,
-	end: usize,
+/// A block of heap-allocated, pinned memory of size [`N`].
+#[derive(Clone, Debug)]
+struct Block<T: StreamElement, const N: usize> {
+	/// The pinned, boxed data array.
+	data: Pin<Box<[T; N]>>,
+	/// The offset of valid data, advanced while reading.
+	offset: usize,
+	/// The length of valid data including the offset, advanced while writing.
+	length: usize,
 }
 
-impl<const N: usize> Loc<N> {
-	fn new(start: usize, end: usize) -> Self {
-		Self {
-			start,
-			end,
-		}
+impl<T: StreamElement, const N: usize> Block<T, N> {
+	fn off(&self) -> usize { self.offset }
+	fn len(&self) -> usize { self.length }
+	fn range(&self) -> Range<usize> {
+		self.off()..self.len()
 	}
 
-	fn range(&self) -> Range<usize> { self.start..self.end }
-	fn after(&self) -> RangeFrom<usize> { self.end.. }
-
-	/// Returns the length of the location range.
-	fn len(&self) -> usize { self.end - self.start }
-
-	/// Shrinks the location range from the left (reading).
-	fn shrink_left(&mut self, n: usize) {
-		let start = self.start + n;
-		if start <= N {
-			self.start = start;
-		}
+	fn data(&self) -> &[T] {
+		&self.data[self.range()]
 	}
 
-	/// Shrinks the location range from the right (truncation).
-	fn shrink_right(&mut self, n: usize) {
-		self.end = self.end.saturating_sub(n);
+	fn data_mut(&mut self) -> &mut [T] {
+		let len = self.len();
+		&mut self.data[len..]
 	}
 
-	/// Grows the location range from the right (writing).
-	fn grow_right(&mut self, n: usize) {
-		let end = self.end + n;
-		if end <= N {
-			self.end = end;
-		}
+	fn consume(&mut self, count: usize) -> usize {
+		self.offset = min(self.offset + count, self.length);
+		self.offset
 	}
 
-	/// Truncates the location range to at most `n` in length.
-	fn truncate(&mut self, n: usize) {
-		self.end = min(self.start + n, self.end);
+	fn truncate(&mut self, count: usize) -> usize {
+		self.length = max(self.length.saturating_sub(count), self.offset);
+		self.length
+	}
+
+	fn grow(&mut self, count: usize) -> usize {
+		self.length = min(self.length + count, N);
+		self.length
 	}
 
 	fn reset(&mut self) {
-		let Self { start, end } = self;
-		*start = 0;
-		*end   = N;
+		self.offset = 0;
+		self.length = 0;
 	}
-}
 
-impl<const N: usize> Default for Loc<N> {
-	fn default() -> Self { Self::new(0, 0) }
-}
-
-impl<const N: usize> From<Range<usize>> for Loc<N> {
-	fn from(value: Range<usize>) -> Self {
-		Self::new(
-			min(value.start, N),
-			min(value.end,   N),
-		)
-	}
-}
-
-impl<const N: usize> From<RangeFull> for Loc<N> {
-	fn from(_: RangeFull) -> Self { Self::default() }
-}
-
-impl<const N: usize> From<RangeTo<usize>> for Loc<N> {
-	fn from(value: RangeTo<usize>) -> Self {
-		Self::new(
-			0,
-			min(value.end, N),
-		)
-	}
-}
-
-impl<const A: usize, const B: usize> Add<Loc<B>> for Loc<A> {
-	type Output = Self;
-
-	fn add(self, rhs: Loc<B>) -> Self {
-		let Self { start: sa, end: ea } = self;
-		let Loc  { start: sb, end: eb } = rhs;
-		(min(sb + sa, ea)..min(eb + sa, ea)).into()
-	}
-}
-
-impl<const N: usize> Add<RangeTo<usize>> for Loc<N> {
-	type Output = Self;
-
-	fn add(self, rhs: RangeTo<usize>) -> Self {
-		let Self { start, end: end_a } = self;
-		let RangeTo { end: end_b } = rhs;
-		(start..min(end_a + start, end_b)).into()
-	}
-}
-
-impl<const N: usize> SubAssign<usize> for Loc<N> {
-	fn sub_assign(&mut self, rhs: usize) {
-		self.start -= rhs;
-		self.end   -= rhs;
-	}
-}
-
-impl<const N: usize> RangeBounds<usize> for Loc<N> {
-	fn start_bound(&self) -> Bound<&usize> { Bound::Included(&self.start) }
-	fn   end_bound(&self) -> Bound<&usize> { Bound::Excluded(&self.end  ) }
-
-	fn contains<U>(&self, item: &U) -> bool where usize: PartialOrd<U>,
-												  U: ?Sized + PartialOrd<usize> {
-		item >= &self.start &&
-		item < &self.end
-	}
-}
-
-// Memory
-
-#[derive(Clone, Debug)]
-struct MemoryData<const N: usize> {
-	data: Pin<Box<[u8; N]>>,
-	/// The bounds of written data. Can only be modified for owned memory, because
-	/// invalidating shared data to the left would result in data loss, and adding
-	/// data to the right would break the read-only contract.
-	bounds: Loc<N>,
-}
-
-impl<const N: usize> MemoryData<N> {
-	#[inline]
-	fn new(data: Pin<Box<[u8; N]>>, loc: Loc<N>) -> Self {
-		Self {
-			data,
-			bounds: loc,
-		}
+	fn shift(&mut self) {
+		let range = self.range();
+		self.data.copy_within(range, 0);
+		let off = self.off();
+		self.offset = 0;
+		self.length -= off;
 	}
 	
-	fn consume(&mut self, n: usize) {
-		self.bounds.shrink_left(n);
-	}
+	fn shift_right(&mut self, count: usize) {
+		assert!(self.len() + count < N);
 
-	fn truncate(&mut self, n: usize) {
-		self.bounds.shrink_right(n);
-	}
-
-	fn add(&mut self, n: usize) {
-		self.bounds.grow_right(n);
-	}
-
-	fn clear(&mut self) {
-		self.bounds.reset();
+		let range = self.range();
+		let off = self.off();
+		self.data.copy_within(range, off + count);
+		self.offset += count;
+		self.length += count;
 	}
 }
 
-impl<const N: usize> Default for MemoryData<N> {
-	#[inline]
-	fn default() -> Self {
-		Self::new(Box::pin([0; N]), Loc::default())
-	}
+impl<T: StreamElement, const N: usize> Default for Block<T, N> {
+	fn default() -> Self { Box::pin([T::default(); N]).into() }
 }
 
-impl<const N: usize> Index<usize> for MemoryData<N> {
-	type Output = u8;
-	fn index(&self, index: usize) -> &u8 {
-		&self.data[index]
-	}
-}
-
-impl<const N: usize> IndexMut<usize> for MemoryData<N> {
-	fn index_mut(&mut self, index: usize) -> &mut u8 {
-		&mut self.data[index]
-	}
-}
-
-impl<const N: usize> Index<Loc<N>> for MemoryData<N> {
-	type Output = [u8];
-
-	fn index(&self, index: Loc<N>) -> &[u8] {
-		&self.data[(self.bounds + index).range()]
-	}
-}
-
-impl<const N: usize> IndexMut<Loc<N>> for MemoryData<N> {
-	fn index_mut(&mut self, index: Loc<N>) -> &mut [u8] {
-		&mut self.data[(self.bounds + index).range()]
-	}
-}
-
-impl<const N: usize> Index<Range<usize>> for MemoryData<N> {
-	type Output = [u8];
-
-	fn index(&self, index: Range<usize>) -> &[u8] {
-		&self.data[index]
-	}
-}
-
-impl<const N: usize> IndexMut<Range<usize>> for MemoryData<N> {
-	fn index_mut(&mut self, index: Range<usize>) -> &mut [u8] {
-		&mut self.data[index]
-	}
-}
-
-/// A sharable, fixed-size chunk of memory for [`Segment`]. Memory is copy-on-write
-/// when shared, directly mutable when fully-owned. This way, expensive copies can
-/// be avoided as much as possible; simple IO between buffers is almost zero-cost.
-/// In addition, memory is pinned to the heap to avoid moves.
-#[derive(Clone, Debug, Default)]
-pub struct Memory<const N: usize> {
-	data: Rc<MemoryData<N>>,
-	loc: Loc<N>,
-}
-
-impl<const N: usize> Memory<N> {
-	fn new(data: Rc<MemoryData<N>>, loc: Loc<N>) -> Self {
+impl<T: StreamElement, const N: usize> From<Pin<Box<[T; N]>>> for Block<T, N> {
+	fn from(data: Pin<Box<[T; N]>>) -> Self {
 		Self {
 			data,
-			loc,
+			offset: 0,
+			length: 0
 		}
 	}
+}
 
-	fn start(&self) -> usize { self.loc.start }
-	fn end  (&self) -> usize { self.loc.end   }
+impl<T: StreamElement, const N: usize> AsRef<[T]> for Block<T, N> {
+	fn as_ref(&self) -> &[T] { self.data() }
+}
 
-	pub fn off_start(&self) -> usize { self.start() + self.data.bounds.start }
-	pub fn off_end  (&self) -> usize { self.end  () + self.data.bounds.end   }
+impl<T: StreamElement, const N: usize> AsMut<[T]> for Block<T, N> {
+	fn as_mut(&mut self) -> &mut [T] { self.data_mut() }
+}
 
-	fn range_of(&self, n: usize) -> Range<usize> {
-		self.start()..n + self.start()
+#[derive(Clone, Debug, Default)]
+pub struct Memory<T: StreamElement, const N: usize> {
+	block: Rc<Block<T, N>>,
+	offset: usize,
+	length: usize,
+}
+
+impl<T: StreamElement, const N: usize> Memory<T, N> {
+	pub fn off(&self) -> usize { self.offset }
+	pub fn len(&self) -> usize { self.length }
+	pub fn cnt(&self) -> usize { self.length - self.off() }
+	pub fn lim(&self) -> usize { N - self.length }
+
+	pub fn is_empty(&self) -> bool {
+		self.offset >= self.length
 	}
 
-	/// Returns the length of this memory, the number of bytes that can be read.
-	pub fn len(&self) -> usize { self.loc.len() }
+	/// Returns a slice of readable data.
+	pub fn data(&self) -> &[T] {
+		let block = &*self.block;
+		&block.data[self.off()..self.len()]
+	}
 
-	/// Returns the limit of this memory, the number of bytes that can be written.
-	pub fn lim(&self) -> usize { N - self.end() }
+	/// Returns a slice of unwritten data.
+	pub fn data_mut(&mut self) -> &mut [T] {
+		self.fork();
+		let len = self.len();
+		&mut self.block().data[len..]
+	}
 
 	/// Shares all of this memory.
 	pub fn share_all(&self) -> Self { self.clone() }
 
-	/// Shares this memory with at most `byte_count` bytes accessible.
-	pub fn share(&self, byte_count: usize) -> Self {
+	/// Shares this memory with at most `count` bytes accessible.
+	pub fn share(&self, count: usize) -> Self {
 		let mut mem = self.share_all();
-		mem.loc.truncate(byte_count);
+		mem.truncate(count);
 		mem
 	}
 
 	/// Returns `true` if this memory is shared.
-	pub fn is_shared(&self) -> bool { Rc::strong_count(&self.data) > 1 }
+	pub fn is_shared(&self) -> bool { Rc::strong_count(&self.block) > 1 }
 
 	/// Copies shared data into owned memory. Has no effect on already owned memory.
 	pub fn fork(&mut self) -> bool {
-		// Don't use make_mut because we're also shifting data while copying.
 		if self.is_shared() {
-			let mut forked = Box::pin([0; N]);
-			let data = self.data();
-			let range = ..data.len();
-			(&mut forked[range]).copy_from_slice(data);
+			let mut dst = Block::default();
+			let src = self.data();
+			let len = src.len();
+			dst.as_mut()[..len].copy_from_slice(src);
 
-			self.loc = range.into();
-			self.data = Rc::new(MemoryData::new(forked, self.loc));
-
+			self.offset = 0;
+			self.length = len;
+			self.block = Rc::new(dst);
 			true
 		} else {
 			false
 		}
 	}
 
-	fn get(&mut self) -> &mut MemoryData<N> {
-		// Safety: this function is never called unless there are no strong refs to
-		// the data.
-		unsafe {
-			Rc::get_mut_unchecked(&mut self.data)
-		}
-	}
-
-	/// Returns a slice of the data available for reading.
-	pub fn data(&self) -> &[u8] { &self.data[self.loc] }
-
-	/// Returns a mutable slice of the data available for writing, forking it if
-	/// shared.
-	pub fn data_mut(&mut self) -> &mut [u8] {
-		let loc = self.loc;
-		self.fork();
-		&mut self.get()[loc]
-	}
-
-	/// Pushes one byte to the memory, returning `true` if it could be written.
-	pub fn push(&mut self, byte: u8) -> bool {
-		if self.lim() > 0 {
-			let end = self.end();
-			self.fork();
-			self.get()[end] = byte;
-			self.add(1);
-			true
+	/// Consumes `count` elements after reading.
+	pub fn consume(&mut self, count: usize) {
+		self.offset = if self.is_shared() {
+			min(self.offset + count, self.length)
 		} else {
-			false
+			self.block().consume(count)
 		}
 	}
 
-	/// Pops one byte from the memory.
-	pub fn pop(&mut self) -> Option<u8> {
-		if self.len() > 0 {
-			let byte = Some(self.data[self.start()]);
-			self.consume(1);
-			byte
+	/// Truncates to `count` elements.
+	pub fn truncate(&mut self, count: usize) {
+		self.length = if self.is_shared() {
+			max(self.length.saturating_sub(count), self.offset)
 		} else {
-			None
+			self.block().truncate(count)
 		}
 	}
 
-	/// Pushes a slice of bytes to the memory, returning the number of bytes written.
-	pub fn push_slice(&mut self, bytes: &[u8]) -> usize {
-		let cnt = min(self.lim(), bytes.len());
+	/// Grows by `count` elements after writing.
+	pub fn grow(&mut self, count: usize) {
+		self.length = self.block().grow(count);
+	}
+
+	/// Clears all data without forking.
+	pub fn clear(&mut self) {
+		self.offset = 0;
+		self.length = 0;
+		if !self.is_shared() {
+			self.block().reset();
+		}
+	}
+
+	/// Shifts data such that the offset is zero, forking if shared.
+	pub fn shift(&mut self) {
+		// Forked memory is already shifted.
+		if !self.fork() && self.offset > 0 {
+			self.sync_loc();
+			self.block().shift();
+		}
+	}
+	
+	/// Shifts data to the right by `count` bytes, forking if shared.
+	pub fn shift_right(&mut self, count: usize) {
+		// The fork function shifts data, we can just clone since we're moving data
+		// afterward anyway.
+		let mem = Rc::make_mut(&mut self.block);
+		mem.offset = self.offset;
+		mem.length = self.length;
+		mem.shift_right(count);
+		self.offset = mem.offset;
+		self.length = mem.length;
+	}
+
+	/// Pushes one element to the memory, returning `true` if it could be written.
+	pub fn push(&mut self, value: T) -> bool {
+		if self.cnt() == N {
+			return false
+		}
+
+		self.data_mut()[0] = value;
+		self.grow(1);
+		true
+	}
+
+	/// Pops one element from the memory.
+	pub fn pop(&mut self) -> Option<T> {
+		if self.is_empty() {
+			return None
+		}
+
+		let value = self.data()[0];
+		self.consume(1);
+		Some(value)
+	}
+
+	/// Pushes a slice of elements to the memory, returning the number of bytes
+	/// written.
+	pub fn push_slice(&mut self, values: &[T]) -> usize {
+		let cnt = min(self.lim(), values.len());
 		if cnt > 0 {
-			let range = self.range_of(cnt);
-			self.fork();
-			(&mut self.get()[range]).copy_from_slice(&bytes[..cnt]);
-			self.add(cnt);
+			self.data_mut()[..cnt].copy_from_slice(&values[..cnt]);
+			self.grow(cnt);
 			cnt
 		} else {
 			0
 		}
 	}
 
-	/// Pops bytes into a slice from the memory, returning the number of bytes read.
-	pub fn pop_into_slice(&mut self, bytes: &mut [u8]) -> usize {
-		let cnt = min(self.len(), bytes.len());
+	/// Pops elements into a slice from the memory, returning the number of bytes
+	/// read.
+	pub fn pop_into_slice(&mut self, values: &mut [T]) -> usize {
+		let cnt = min(self.len(), values.len());
 		if cnt > 0 {
-			(&mut bytes[..cnt]).copy_from_slice(&self.data[self.range_of(cnt)]);
+			values[..cnt].copy_from_slice(&self.data()[..cnt]);
 			self.consume(cnt);
 			cnt
 		} else {
@@ -356,73 +267,18 @@ impl<const N: usize> Memory<N> {
 		}
 	}
 
-	/// Consumes `n` bytes after reading.
-	pub fn consume(&mut self, n: usize) {
-		if !self.is_shared() {
-			self.get().consume(n);
-		}
-		self.loc.shrink_left(n);
+	/// Gets a mutable reference to the memory block. Panics if shared.
+	fn block(&mut self) -> &mut Block<T, N> {
+		Rc::get_mut(&mut self.block).expect("block must be owned")
 	}
 
-	/// Truncates to `n` bytes.
-	pub fn truncate(&mut self, n: usize) {
-		if !self.is_shared() {
-			self.get().truncate(n);
-		}
-		self.loc.shrink_right(n);
-	}
+	/// Moves location data to an owned block.
+	fn sync_loc(&mut self) {
+		if self.is_shared() { return }
 
-	/// Adds `n` bytes after writing.
-	pub fn add(&mut self, n: usize) {
-		if !self.is_shared() {
-			self.get().add(n);
-		}
-		self.loc.grow_right(n);
-	}
-
-	/// Clears the memory, forking it if shared.
-	pub fn clear(&mut self) {
-		self.fork();
-		self.get().clear();
-		self.loc.reset();
-	}
-
-	/// Shifts the memory such that it starts at `0`, forking it if shared.
-	pub fn shift(&mut self) {
-		let n = self.loc.start;
-		if n == 0 { return; }
-
-		// Forked memory is already shifted.
-		if !self.fork() {
-			let loc = self.loc;
-			self.loc -= n;
-
-			let data = self.get();
-			data.data.copy_within(data.bounds + loc, 0);
-			data.bounds -= n;
-		}
-	}
-
-	/// Moves data from this memory to another, forking the other memory if shared.
-	/// Returns the number of bytes moved.
-	pub fn move_into(&mut self, other: &mut Memory<N>, byte_count: usize) -> usize {
-		let cnt = min(self.len(), byte_count);
-		let cnt = other.push_slice(&self.data[self.range_of(cnt)]);
-		self.consume(cnt);
-		cnt
-	}
-}
-
-impl<const N: usize> From<[u8; N]> for Memory<N> {
-	fn from(value: [u8; N]) -> Self {
-		Self::new(
-			Rc::new(
-				MemoryData::new(
-					Box::pin(value),
-					Loc::default()
-				)
-			),
-			Loc::default()
-		)
+		let Self { offset, length, .. } = *self;
+		let block = self.block();
+		block.offset = offset;
+		block.length = length;
 	}
 }

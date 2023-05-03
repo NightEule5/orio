@@ -15,7 +15,6 @@
 use std::fmt;
 use std::error::Error as StdError;
 use std::fmt::{Debug, Display, Formatter};
-use crate::pool::Error as PoolError;
 
 pub type ErrorBox = Box<dyn StdError>;
 

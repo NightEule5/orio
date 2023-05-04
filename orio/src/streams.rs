@@ -19,7 +19,7 @@ use std::fmt::{Display, Formatter};
 use amplify_derive::Display;
 use simdutf8::compat::Utf8Error;
 use OperationKind::{BufRead, BufWrite};
-use crate::{Buffer, error, SEGMENT_SIZE};
+use crate::{Buffer, ByteStr, ByteString, error, SEGMENT_SIZE};
 use crate::buffered_wrappers::{buffer_sink, buffer_source};
 use crate::pool::{Error as PoolError, SharedPool};
 use crate::streams::codec::{Decode, Encode};
@@ -262,6 +262,12 @@ pub trait BufSource: BufStream + Source {
 		read_usize read_usize_le -> usize,
 	}
 
+	/// Reads up to `byte_count` bytes into a [`ByteString`].
+	fn read_byte_str(&mut self, byte_count: usize) -> Result<ByteString> {
+		self.request(byte_count)?;
+		self.buf_mut().read_byte_str(byte_count)
+	}
+
 	/// Removes `byte_count` bytes from the source.
 	fn skip(&mut self, mut byte_count: usize) -> Result<usize> {
 		let mut n = 0;
@@ -383,6 +389,17 @@ pub trait BufSink: BufStream + Sink {
 		write_u64 write_u64_le -> u64,
 		write_isize write_isize_le -> isize,
 		write_usize write_usize_le -> usize,
+	}
+
+	fn write_byte_str(&mut self, value: &ByteStr) -> Result {
+		for slice in value.iter() {
+			self.write_from_slice(slice)?;
+		}
+		Ok(())
+	}
+
+	fn write_byte_string(&mut self, value: &ByteString) -> Result {
+		self.write_from_slice(value.as_slice())
 	}
 
 	fn write_from_slice(&mut self, value: &[u8]) -> Result {

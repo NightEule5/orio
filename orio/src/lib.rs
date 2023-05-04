@@ -71,7 +71,9 @@ mod segment;
 mod element;
 pub mod pool;
 mod util;
+mod byte_str;
 
 pub use error::*;
 pub use buffer::*;
 pub use segment::{Segment, SIZE as SEGMENT_SIZE};
+pub use byte_str::*;

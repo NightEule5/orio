@@ -19,7 +19,7 @@ use std::ops::RangeBounds;
 use simdutf8::compat::from_utf8;
 use crate::pool::{DefaultPool, Pool, SharedPool};
 use crate::segment::{Segment, SegmentRing};
-use crate::{expect, SEGMENT_SIZE};
+use crate::{ByteStr, ByteString, expect, SEGMENT_SIZE};
 use crate::streams::{BufSink, BufSource, BufStream, Error, OffsetUtf8Error, Result, Sink, Source, Stream};
 use crate::streams::OperationKind::BufRead;
 
@@ -395,6 +395,12 @@ impl<P: SharedPool> Buffer<P> {
 		None
 	}
 
+	/// Borrows the contents of the buffer as a [`ByteStr`].
+	pub fn as_byte_str(&self) -> ByteStr {
+		let ref segments = self.segments;
+		segments.into()
+	}
+
 	fn read_segments(
 		&mut self,
 		mut count: usize,
@@ -581,6 +587,17 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 		read_i32   read_i32_le   i32   read_u32   read_u32_le u32,
 		read_i64   read_i64_le   i64   read_u64   read_u64_le u64,
 		read_isize read_isize_le isize read_usize read_usize_le usize
+	}
+
+	fn read_byte_str(&mut self, byte_count: usize) -> Result<ByteString> {
+		let len = min(byte_count, self.count());
+		let mut dst = ByteString::with_capacity(len);
+
+		self.read_segments(len, |seg, _| {
+			dst.extend_from_slice(seg.data());
+			Ok(seg.len())
+		})?;
+		Ok(dst)
 	}
 
 	fn read_into_slice(&mut self, dst: &mut [u8]) -> Result<usize> {

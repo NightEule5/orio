@@ -21,6 +21,7 @@ use crate::pool::{DefaultPool, Pool, SharedPool};
 use crate::segment::{Segment, SegmentRing};
 use crate::{ByteStr, ByteString, expect, SEGMENT_SIZE};
 use crate::streams::{BufSink, BufSource, BufStream, Error, OffsetUtf8Error, Result, Sink, Source, Stream};
+use crate::streams::codec::Encode;
 use crate::streams::OperationKind::BufRead;
 
 #[derive(Copy, Clone, Debug)]
@@ -99,8 +100,8 @@ pub struct Buffer<P: SharedPool = DefaultPool> {
 	options: BufferOptions,
 }
 
-impl<P: SharedPool> Default for Buffer<P> {
-	fn default() -> Self { Self::new(P::get()) }
+impl Default for Buffer {
+	fn default() -> Self { Self::new(DefaultPool::get()) }
 }
 
 impl<P: SharedPool> Debug for Buffer<P> {
@@ -108,6 +109,69 @@ impl<P: SharedPool> Debug for Buffer<P> {
 		f.debug_struct("Buffer")
 			.field("segments", &self.segments)
 			.finish_non_exhaustive()
+	}
+}
+
+impl Buffer {
+	/// Creates a new buffer with `value`. Shorthand for:
+	///
+	/// ```no_run
+	/// use orio::Buffer;
+	/// use orio::streams::BufSink;
+	///
+	/// let mut buf = Buffer::default();
+	/// buf.write_from(value)?;
+	/// ```
+	pub fn from_encode(value: impl Encode) -> Result<Self> {
+		let mut buf = Self::default();
+		buf.write_from(value)?;
+		Ok(buf)
+	}
+	
+	/// Creates a new buffer with `value` in little-endian order. Shorthand for:
+	///
+	/// ```no_run
+	/// use orio::Buffer;
+	/// use orio::streams::BufSink;
+	///
+	/// let mut buf = Buffer::default();
+	/// buf.write_from_le(value)?;
+	/// ```
+	pub fn from_encode_le(value: impl Encode) -> Result<Self> {
+		let mut buf = Self::default();
+		buf.write_from_le(value)?;
+		Ok(buf)
+	}
+
+	/// Creates a new buffer containing `value` as UTF-8-encoded bytes. Shorthand
+	/// for:
+	///
+	/// ```no_run
+	/// use orio::Buffer;
+	/// use orio::streams::BufSink;
+	///
+	/// let mut buf = Buffer::default();
+	/// buf.write_utf8(value)?;
+	/// ```
+	pub fn from_utf8(value: &str) -> Result<Self> {
+		let mut buf = Buffer::default();
+		buf.write_utf8(value)?;
+		Ok(buf)
+	}
+
+	/// Creates a new buffer with `value`. Shorthand for:
+	///
+	/// ```no_run
+	/// use orio::Buffer;
+	/// use orio::streams::BufSink;
+	///
+	/// let mut buf = Buffer::default();
+	/// buf.write_from_slice(value)?;
+	/// ```
+	pub fn from_slice(value: &[u8]) -> Result<Self> {
+		let mut buf = Buffer::default();
+		buf.write_from_slice(value)?;
+		Ok(buf)
 	}
 }
 
@@ -304,9 +368,7 @@ impl<P: SharedPool> Buffer<P> {
 
 	/// Skips up to `byte_count` bytes.
 	pub fn skip(&mut self, byte_count: usize) -> Result<usize> {
-		self.read_segments(byte_count, |seg, mut count| {
-			count = min(seg.len(), count);
-			seg.consume(count);
+		self.read_segments_exact(byte_count, |seg, mut count| {
 			Ok(count)
 		})
 	}
@@ -401,21 +463,33 @@ impl<P: SharedPool> Buffer<P> {
 		segments.into()
 	}
 
-	fn read_segments(
+	fn read_segments_exact(
 		&mut self,
 		mut count: usize,
-		mut consume: impl FnMut(&mut Segment, usize) -> Result<usize>,
+		mut consume: impl FnMut(&[u8], usize) -> Result<usize>,
 	) -> Result<usize> {
 		self.require(count)?;
-		let mut processed_count = 0;
+		self.read_segments(count, |data| {
+			let n = consume(data, count)?;
+			count -= n;
+			Ok(n)
+		})
+	}
 
-		let Self { segments, .. } = self;
-		while let Some(mut seg) = if count > 0 {
+	fn read_segments(
+		&mut self,
+		max_count: usize,
+		mut consume: impl FnMut(&[u8]) -> Result<usize>,
+	) -> Result<usize> {
+		let mut read = 0;
+		let ref mut segments = self.segments;
+		while let Some(mut seg) = if read < max_count {
 			segments.pop_front()
 		} else {
 			None
 		} {
-			let n = match consume(&mut seg, count) {
+			let mut n = min(max_count - read, seg.len());
+			n = match consume(&seg.data()[..n]).map_err(Error::with_op_buf_read) {
 				Ok(n) => n,
 				error => {
 					segments.push_front(seg);
@@ -423,8 +497,8 @@ impl<P: SharedPool> Buffer<P> {
 				}
 			};
 
-			processed_count += n;
-			count -= n;
+			read += n;
+			seg.consume(n);
 
 			if seg.is_empty() {
 				segments.push_empty(seg);
@@ -434,13 +508,13 @@ impl<P: SharedPool> Buffer<P> {
 		}
 
 		self.tidy().map_err(Error::with_op_buf_read)?;
-		Ok(processed_count)
+		Ok(read)
 	}
 
 	fn write_segments(
 		&mut self,
 		count: usize,
-		mut write: impl FnMut(&mut Segment) -> usize
+		mut write: impl FnMut(&mut [u8]) -> Result<usize>
 	) -> Result<usize> {
 		let Self { pool, segments, .. } = self;
 
@@ -454,7 +528,14 @@ impl<P: SharedPool> Buffer<P> {
 				)?
 			};
 
-			written += write(&mut seg);
+			let mut n = min(count - written, seg.limit());
+			let slice = &mut seg.data_mut()[..n];
+
+			if slice.is_empty() { continue }
+
+			n = write(slice).map_err(Error::with_op_buf_write)?;
+			written += n;
+			seg.grow(n);
 
 			if seg.is_empty() {
 				segments.push_empty(seg);
@@ -578,7 +659,7 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 			segments.push_front(seg);
 		}
 
-		self.tidy()?;
+		self.tidy().map_err(Error::with_op_buf_read)?;
 		Ok(byte)
 	}
 
@@ -593,8 +674,8 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 		let len = min(byte_count, self.count());
 		let mut dst = ByteString::with_capacity(len);
 
-		self.read_segments(len, |seg, _| {
-			dst.extend_from_slice(seg.data());
+		self.read_segments(byte_count, |seg| {
+			dst.extend_from_slice(seg);
 			Ok(seg.len())
 		})?;
 		Ok(dst)
@@ -607,23 +688,21 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 	}
 
 	fn read_into_slice_exact(&mut self, dst: &mut [u8]) -> Result {
-		self.read_segments(dst.len(), |seg, count| {
+		self.read_segments_exact(dst.len(), |seg, count| {
 			let off = dst.len() - count;
-			Ok(seg.pop_into_slice(&mut dst[off..]))
+			let end = min(dst.len(), seg.len());
+			dst[off..end].copy_from_slice(seg);
+			Ok(end - off)
 		})?;
 		Ok(())
 	}
 
 	fn read_utf8(&mut self, str: &mut String, byte_count: usize) -> Result<usize> {
 		let mut off = 0;
-		self.read_segments(byte_count, |seg, mut count| {
-			let utf8 = {
-				count = min(seg.len(), count);
-				let data = &seg.data()[..count];
-				from_utf8(data).map_err(|err|
-					Error::invalid_utf8(BufRead, OffsetUtf8Error::new(err, off))
-				)?
-			};
+		self.read_segments(byte_count, |seg| {
+			let utf8 = from_utf8(seg).map_err(|err|
+				Error::invalid_utf8(BufRead, OffsetUtf8Error::new(err, off))
+			)?;
 
 			off += seg.len();
 
@@ -657,18 +736,14 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 
 	fn read_utf8_into_slice(&mut self, str: &mut str) -> Result<usize> {
 		let mut off = 0;
-		self.read_segments(str.len(), |seg, count| {
-			let utf8 = {
-				let len = min(seg.len(), count);
-				let data = &seg.data()[..len];
-				from_utf8(data).map_err(|err|
-					Error::invalid_utf8(BufRead, OffsetUtf8Error::new(err, off))
-				)?
-			};
+		self.read_segments(str.len(), |seg| {
+			let utf8 = from_utf8(seg).map_err(|err|
+				Error::invalid_utf8(BufRead, OffsetUtf8Error::new(err, off))
+			)?;
 
 			off += seg.len();
 
-			let off = str.len() - count;
+			let off = str.len() - seg.len();
 			unsafe {
 				str[off..].as_bytes_mut().copy_from_slice(utf8.as_bytes());
 			}
@@ -704,8 +779,8 @@ impl<P: SharedPool> BufSink for Buffer<P> {
 
 	fn write_u8(&mut self, value: u8) -> Result {
 		self.write_segments(1, |seg| {
-			seg.push(value);
-			1
+			seg[0] = value;
+			Ok(1)
 		})?;
 		Ok(())
 	}
@@ -724,9 +799,10 @@ impl<P: SharedPool> BufSink for Buffer<P> {
 	fn write_from_slice(&mut self, mut value: &[u8]) -> Result {
 		while !value.is_empty() {
 			self.write_segments(value.len(), |seg| {
-				let n = seg.push_slice(value);
+				let n = min(seg.len(), value.len());
+				seg.copy_from_slice(value);
 				value = &value[n..];
-				n
+				Ok(n)
 			})?;
 		}
 		Ok(())

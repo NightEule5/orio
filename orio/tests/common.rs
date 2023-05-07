@@ -12,7 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Arguments, Debug};
+use std::error::Error;
+use std::fmt;
+use std::fmt::{Arguments, Debug, Display, Formatter};
+
+pub struct DisplayError<E: Error>(pub E);
+
+impl<E: Error> Debug for DisplayError<E> {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		Display::fmt(&self.0, f)
+	}
+}
 
 macro_rules! qc_assert_eq {
 	($left:expr,$right:expr) => {{

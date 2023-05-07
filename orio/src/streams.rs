@@ -233,9 +233,9 @@ pub trait BufSource: BufStream + Source {
 	/// count is available, use [`Self::request`].
 	fn require(&mut self, byte_count: usize) -> Result {
 		if self.request(byte_count)? {
-			Err(Error::eos(BufRead))
-		} else {
 			Ok(())
+		} else {
+			Err(Error::eos(BufRead))
 		}
 	}
 

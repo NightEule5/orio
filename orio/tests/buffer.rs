@@ -12,65 +12,94 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(trait_alias)]
-
 #[macro_use]
 mod common;
 
-use std::fmt::{Arguments, Debug};
-use std::result;
-use quickcheck::TestResult;
-use quickcheck_macros::quickcheck;
-use orio::Buffer;
-use orio::streams::{BufSink, BufSource, Error};
-use orio::streams::codec::{Encode, Decode};
+mod write {
+	use quickcheck_macros::quickcheck;
+	use orio::{Buffer, ByteString};
 
-pub fn format_qc_assert_error<L: Debug, R: Debug>(left: &L, right: &R, msg: Option<Arguments>) -> String {
-	if let Some(msg) = msg {
-		format!(
-			"assertion failed `(left == right)`: {msg}\n \
-			left: `{left:?}`,\nright: `{right:?}`",
-		)
-	} else {
-		format!(
-			"assertion failed `(left == right)`:\n \
-			left: `{left:?}`,\nright: `{right:?}`",
-		)
+	mod primitive {
+		use quickcheck_macros::quickcheck;
+		use orio::{Buffer, ByteString};
+
+		macro_rules! gen {
+	    	($($ty:ident)+) => {
+				$(
+				#[quickcheck]
+				fn $ty(v: $ty) {
+					let buffer = Buffer::from_encode(v).unwrap();
+					assert_eq!(buffer.as_byte_str(), ByteString::from(&v.to_be_bytes()[..]));
+				}
+				)+
+			};
+		}
+
+		gen! { u8 i8 u16 i16 u32 i32 u64 i64 usize isize }
+	}
+
+	#[quickcheck]
+	fn vec(vec: Vec<u8>) {
+		let buffer = Buffer::from_slice(&vec).unwrap();
+		assert_eq!(buffer.as_byte_str(), ByteString::from(vec));
+	}
+
+	#[quickcheck]
+	fn str(str: String) {
+		let buffer = Buffer::from_utf8(&str).unwrap();
+		assert_eq!(buffer.as_byte_str(), ByteString::from(str.as_bytes()));
 	}
 }
 
-#[quickcheck] fn    byte(b: u8) -> TestResult { read_write(b) }
-#[quickcheck] fn  s_byte(b: i8) -> TestResult { read_write(b) }
-#[quickcheck] fn   short(b: u16) -> TestResult { read_write(b) }
-#[quickcheck] fn s_short(b: i16) -> TestResult { read_write(b) }
-#[quickcheck] fn     int(b: u32) -> TestResult { read_write(b) }
-#[quickcheck] fn   s_int(b: i32) -> TestResult { read_write(b) }
-#[quickcheck] fn    long(b: u64) -> TestResult { read_write(b) }
-#[quickcheck] fn  s_long(b: i64) -> TestResult { read_write(b) }
-#[quickcheck] fn    size(b: usize) -> TestResult { read_write(b) }
-#[quickcheck] fn  s_size(b: isize) -> TestResult { read_write(b) }
+mod read {
+	use quickcheck_macros::quickcheck;
+	use orio::Buffer;
+	use orio::streams::BufSource;
 
-#[quickcheck]
-fn str(str: String) -> TestResult {
-	read_write(str)
-}
+	mod primitive {
+		use quickcheck_macros::quickcheck;
+		use orio::Buffer;
+		use orio::streams::BufSource;
 
-fn read_write<T>(value: T) -> TestResult where T: Clone +
-												  Encode +
-												  Decode +
-												  Debug +
-												  Default +
-												  PartialEq {
-	fn to_tr(error: Error) -> TestResult {
-		TestResult::error(error.to_string())
+		macro_rules! gen {
+	    	($($ty:ident$name:ident),+) => {
+				$(
+				#[quickcheck]
+				fn $ty(v: $ty) {
+					let mut buffer = Buffer::from_encode(v).unwrap();
+					assert_eq!(buffer.$name().unwrap(), v);
+				}
+				)+
+			};
+		}
+
+		gen! {
+			u8    read_u8,
+			i8    read_i8,
+			u16   read_u16,
+			i16   read_i16,
+			u32   read_u32,
+			i32   read_i32,
+			u64   read_u64,
+			i64   read_i64,
+			usize read_usize,
+			isize read_isize
+		}
 	}
 
-	let mut read_value = T::default();
-	let mut buf: Buffer = Buffer::default();
-	if let Err(error) = buf.write_from(value.clone()) { return to_tr(error) }
-	if let Err(error) = buf.read_into(&mut read_value, usize::MAX) {
-		return to_tr(error)
+	#[quickcheck]
+	fn vec(vec: Vec<u8>) {
+		let mut buffer = Buffer::from_slice(&vec).unwrap();
+		let mut slice = vec![0; vec.len()];
+		buffer.read_into_slice_exact(&mut slice).unwrap();
+		assert_eq!(slice, vec);
 	}
 
-	qc_assert_eq!(value, read_value)
+	#[quickcheck]
+	fn str(str: String) {
+		let mut buffer = Buffer::from_utf8(&str).unwrap();
+		let mut string = String::with_capacity(str.len());
+		buffer.read_all_utf8(&mut string).unwrap();
+		assert_eq!(string, str);
+	}
 }

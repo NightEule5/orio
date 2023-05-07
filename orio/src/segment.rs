@@ -53,6 +53,7 @@ impl SegmentRing {
 	/// Returns `true` if the total void size exceeds `threshold`.
 	pub(crate) fn void(&self, threshold: usize) -> bool {
 		if threshold == 0 { return true }
+		if self.count == 0 { return false }
 
 		let last = self.length - 1;
 		let mut voids = self.iter()
@@ -80,8 +81,9 @@ impl SegmentRing {
 	/// Pushes to the front of the buffer. Used for reading in case a segment can
 	/// only be partially read.
 	pub fn push_front(&mut self, seg: Segment) {
-		self.ring.push_front(seg);
+		self.count += seg.len();
 		self.length += 1;
+		self.ring.push_front(seg);
 	}
 
 	/// Pushes an empty segment to the back of the buffer.
@@ -94,11 +96,14 @@ impl SegmentRing {
 	/// Inserts a written segment after the last in the buffer.
 	pub fn push_laden(&mut self, seg: Segment) {
 		assert!(!seg.is_empty(), "only laden segments should be inserted");
-		self.limit -= self.get().map(|cur| cur.mem.lim()).unwrap_or_default();
-		self.limit += seg.mem.lim();
-		self.count += seg.mem.cnt();
-		self.ring.insert(self.length, seg);
-		self.length += 1;
+		let lim_change = self.get().map(Segment::limit).unwrap_or_default();
+		let Self { ring, length, limit, count } = self;
+
+		*limit -= lim_change;
+		*limit += seg.limit();
+		*count += seg.len();
+		ring.insert(*length, seg);
+		*length += 1;
 	}
 
 	/// Pops the back-most unfilled segment from the ring buffer. Used for writing.
@@ -113,8 +118,8 @@ impl SegmentRing {
 
 		let Self { length, limit, count, .. } = self;
 		*length -= 1;
-		*count -= seg.mem.cnt();
-		*limit -= seg.mem.lim();
+		*count -= seg.len();
+		*limit -= seg.limit();
 		Some(seg)
 	}
 
@@ -122,9 +127,19 @@ impl SegmentRing {
 	pub fn pop_front(&mut self) -> Option<Segment> {
 		if self.is_empty() { return None }
 
+		let Self { length, count, .. } = *self;
 		let seg = self.ring.pop_front()?;
+
+		debug_assert!(length > 0, "no segments after successful pop");
+		debug_assert!(
+			count >= seg.len(),
+			"count ({count}) not large enough to contain the popped segment with \
+			count {}",
+			seg.len()
+		);
+
 		self.length -= 1;
-		self.count -= seg.mem.len();
+		self.count -= seg.len();
 		Some(seg)
 	}
 

@@ -15,7 +15,7 @@
 use ErrorKind::Eos;
 use crate::Buffer;
 use crate::pool::SharedPool;
-use crate::streams::{Sink, Source, Stream, Result, BufStream, BufSource, Error, BufSink, ErrorKind};
+use crate::streams::{Sink, Source, Result, BufStream, BufSource, Error, BufSink, ErrorKind};
 use crate::streams::OperationKind::{BufFlush, BufRead};
 use crate::segment::SIZE;
 
@@ -65,26 +65,24 @@ impl<S: Source> BufferedSource<S> {
 	}
 }
 
-impl<S: Source> Stream for BufferedSource<S> {
-	fn close(&mut self) -> Result {
-		if !self.closed {
-			self.closed = true;
-			let buf_close = self.buffer.close();
-			let src_close = self.source.close();
-			buf_close?;
-			src_close
-		} else {
-			Ok(())
-		}
-	}
-}
-
 impl<S: Source> Source for BufferedSource<S> {
 	fn read(&mut self, buffer: &mut Buffer<impl SharedPool>, byte_count: usize) -> Result<usize> {
 		if self.closed { return Err(Error::closed(BufRead)) }
 
 		self.request(byte_count)?;
 		self.buffer.read(buffer, byte_count)
+	}
+
+	fn close_source(&mut self) -> Result {
+		if !self.closed {
+			self.closed = true;
+			let buf_close = self.buffer.close();
+			let src_close = self.source.close_source();
+			buf_close?;
+			src_close
+		} else {
+			Ok(())
+		}
 	}
 }
 
@@ -112,7 +110,7 @@ impl<S: Source> BufSource for BufferedSource<S> {
 
 impl<S: Source> Drop for BufferedSource<S> {
 	fn drop(&mut self) {
-		let _ = self.close();
+		let _ = self.close_source();
 	}
 }
 
@@ -120,20 +118,6 @@ pub struct BufferedSink<S: Sink> {
 	buffer: Buffer,
 	sink: S,
 	closed: bool,
-}
-
-impl<S: Sink> Stream for BufferedSink<S> {
-	fn close(&mut self) -> Result {
-		if !self.closed {
-			self.closed = true;
-			let flush = self.flush();
-			let clear = self.buffer.close();
-			flush?;
-			clear
-		} else {
-			Ok(())
-		}
-	}
 }
 
 impl<S: Sink> Sink for BufferedSink<S> {
@@ -159,6 +143,20 @@ impl<S: Sink> Sink for BufferedSink<S> {
 			return Err(Error::closed(BufFlush))
 		}
 	}
+
+	fn close_sink(&mut self) -> Result {
+		if !self.closed {
+			self.closed = true;
+			let flush = self.flush();
+			let close = self.sink.close_sink();
+			let clear = self.buffer.close();
+			flush?;
+			close?;
+			clear
+		} else {
+			Ok(())
+		}
+	}
 }
 
 impl<S: Sink> BufStream for BufferedSink<S> {
@@ -175,6 +173,6 @@ impl<S: Sink> BufSink for BufferedSink<S> {
 
 impl<S: Sink> Drop for BufferedSink<S> {
 	fn drop(&mut self) {
-		let _ = self.close();
+		let _ = self.close_sink();
 	}
 }

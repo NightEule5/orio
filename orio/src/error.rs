@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
+use std::{fmt, io};
 use std::error::Error as StdError;
 use std::fmt::{Debug, Display, Formatter};
 
-pub type ErrorBox = Box<dyn StdError>;
+pub type ErrorBox = Box<dyn StdError + Send + Sync>;
 
 pub trait OperationKind: Copy + Debug + Display {
 	fn unknown() -> Self;
@@ -46,7 +46,11 @@ impl<O: OperationKind, E: ErrorKind> Display for Error<O, E> {
 
 impl<O: OperationKind, E: ErrorKind> StdError for Error<O, E> {
 	fn source(&self) -> Option<&(dyn StdError + 'static)> {
-		self.source.as_deref()
+		if let Some(ref source) = self.source {
+			Some(source.as_ref())
+		} else {
+			None
+		}
 	}
 }
 

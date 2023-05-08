@@ -136,18 +136,23 @@ impl Error {
 
 	/// Convenience shorthand for `with_operation(OperationKind::BufCompact)`.
 	pub fn with_op_buf_compact(self) -> Self { self.with_operation(BufCompact) }
-}
 
-/// A data stream, either [`Source`] or [`Sink`]
-pub trait Stream {
-	/// Closes the stream. All default streams close automatically when dropped.
-	/// Closing is idempotent, [`close`] may be called more than once with no
-	/// effect.
-	fn close(&mut self) -> Result { Ok(()) }
+	pub(crate) fn into_io(self) -> io::Error {
+		match self.kind {
+			Eos => io::Error::new(io::ErrorKind::UnexpectedEof, self),
+			Io  => {
+				let Some(src) = self.io_source() else {
+					return io::Error::other(self)
+				};
+				io::Error::new(src.kind(), self)
+			}
+			_   => io::Error::other(self)
+		}
+	}
 }
 
 /// A data source.
-pub trait Source: Stream {
+pub trait Source {
 	/// Reads `count` bytes from the source into the buffer.
 	fn read(&mut self, sink: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize>;
 
@@ -156,6 +161,11 @@ pub trait Source: Stream {
 	fn read_all(&mut self, sink: &mut Buffer<impl SharedPool>) -> Result<usize> {
 		self.read(sink, usize::MAX)
 	}
+
+	/// Closes the source. All default streams close automatically when dropped.
+	/// Closing is idempotent, [`close`] may be called more than once with no
+	/// effect.
+	fn close_source(&mut self) -> Result { Ok(()) }
 }
 
 pub trait SourceBuffer: Source + Sized {
@@ -166,7 +176,7 @@ pub trait SourceBuffer: Source + Sized {
 impl<S: Source> SourceBuffer for S { }
 
 /// A data sink.
-pub trait Sink: Stream {
+pub trait Sink {
 	/// Writes `count` bytes from the buffer into the sink.
 	fn write(
 		&mut self,
@@ -185,13 +195,11 @@ pub trait Sink: Stream {
 
 	/// Writes all buffered data to its final target.
 	fn flush(&mut self) -> Result { Ok(()) }
-}
 
-impl<S: Sink> Stream for S {
-	/// Flushes and closes the stream. All default streams close automatically when
+	/// Flushes and closes the sink. All default streams close automatically when
 	/// dropped. Closing is idempotent, [`close`] may be called more than once with
 	/// no effect.
-	default fn close(&mut self) -> Result { self.flush() }
+	fn close_sink(&mut self) -> Result { self.flush() }
 }
 
 pub trait SinkBuffer: Sink + Sized {
@@ -201,7 +209,7 @@ pub trait SinkBuffer: Sink + Sized {
 
 impl<S: Sink> SinkBuffer for S { }
 
-pub trait BufStream: Stream {
+pub trait BufStream {
 	fn buf(&self) -> &Buffer<impl SharedPool>;
 	fn buf_mut(&mut self) -> &mut Buffer<impl SharedPool>;
 }

@@ -51,7 +51,7 @@
 
 #![allow(incomplete_features)]
 #![feature(
-associated_type_bounds,
+	associated_type_bounds,
 	associated_type_defaults,
 	drain_filter,
 	extend_one,
@@ -62,6 +62,7 @@ associated_type_bounds,
 	thread_local,
 	type_alias_impl_trait,
 )]
+#![feature(io_error_other)]
 
 mod buffer;
 mod buffered_wrappers;
@@ -72,8 +73,10 @@ mod element;
 pub mod pool;
 mod util;
 mod byte_str;
+mod std_io;
 
 pub use error::*;
 pub use buffer::*;
 pub use segment::{Segment, SIZE as SEGMENT_SIZE};
 pub use byte_str::*;
+pub use std_io::*;

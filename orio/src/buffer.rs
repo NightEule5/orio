@@ -15,12 +15,13 @@
 use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
+use std::io::{Read, Write};
 use std::ops::RangeBounds;
 use simdutf8::compat::from_utf8;
 use crate::pool::{DefaultPool, Pool, SharedPool};
 use crate::segment::{Segment, SegmentRing};
 use crate::{ByteStr, ByteString, expect, SEGMENT_SIZE};
-use crate::streams::{BufSink, BufSource, BufStream, Error, OffsetUtf8Error, Result, Sink, Source, Stream};
+use crate::streams::{BufSink, BufSource, BufStream, Error, OffsetUtf8Error, Result, Sink, Source};
 use crate::streams::codec::Encode;
 use crate::streams::OperationKind::BufRead;
 
@@ -463,6 +464,9 @@ impl<P: SharedPool> Buffer<P> {
 		segments.into()
 	}
 
+	/// Clears and closed the buffer.
+	pub fn close(&mut self) -> Result { self.clear() }
+
 	fn read_segments_exact(
 		&mut self,
 		mut count: usize,
@@ -547,16 +551,20 @@ impl<P: SharedPool> Buffer<P> {
 		self.tidy().map_err(Error::with_op_buf_write)?;
 		Ok(written)
 	}
+
+	pub(crate) fn write_std<R: Read>(&mut self, reader: &mut R, count: usize) -> Result<usize> {
+		self.write_segments(count, |seg| Ok(reader.read(seg)?))
+	}
+
+	pub(crate) fn read_std<W: Write>(&mut self, writer: &mut W, count: usize) -> Result<usize> {
+		self.read_segments(count, |seg| Ok(writer.write(seg)?))
+	}
 }
 
 impl<P: SharedPool> Drop for Buffer<P> {
 	fn drop(&mut self) {
 		let _ = self.close();
 	}
-}
-
-impl<P: SharedPool> Stream for Buffer<P> {
-	fn close(&mut self) -> Result { self.clear() }
 }
 
 impl<P: SharedPool> Source for Buffer<P> {
@@ -593,6 +601,8 @@ impl<P: SharedPool> Source for Buffer<P> {
 	fn read_all(&mut self, sink: &mut Buffer<impl SharedPool>) -> Result<usize> {
 		self.read(sink, self.count())
 	}
+
+	fn close_source(&mut self) -> Result { self.close() }
 }
 
 impl<P: SharedPool> Sink for Buffer<P> {
@@ -603,6 +613,8 @@ impl<P: SharedPool> Sink for Buffer<P> {
 	fn write_all(&mut self, source: &mut Buffer<impl SharedPool>) -> Result<usize> {
 		BufSource::read_all(source, self).map_err(Error::with_op_buf_write)
 	}
+
+	fn close_sink(&mut self) -> Result { self.close() }
 }
 
 impl<P: SharedPool> BufStream for Buffer<P> {

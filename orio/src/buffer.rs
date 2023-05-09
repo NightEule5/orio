@@ -21,7 +21,7 @@ use simdutf8::compat::from_utf8;
 use crate::pool::{DefaultPool, Pool, SharedPool};
 use crate::segment::{Segment, SegmentRing};
 use crate::{ByteStr, ByteString, expect, SEGMENT_SIZE};
-use crate::streams::{BufSink, BufSource, BufStream, Error, OffsetUtf8Error, Result, Sink, Source};
+use crate::streams::{BufSink, BufSource, BufStream, Error, OffsetUtf8Error, Result, Seekable, SeekOffset, Sink, Source};
 use crate::streams::codec::Encode;
 use crate::streams::OperationKind::BufRead;
 
@@ -61,6 +61,17 @@ impl Default for BufferOptions {
 }
 
 impl BufferOptions {
+	/// Presets the options to create a "lean" buffer, a buffer that always shares,
+	/// returns all empty segments, always compacts, and always forks.
+	pub fn lean() -> Self {
+		Self {
+			share_threshold: 0,
+			retention_ratio: 0,
+			compact_threshold: 0,
+			is_fork_reluctant: true,
+		}
+	}
+	
 	/// Returns the segment share threshold.
 	pub fn share_threshold(&self) -> usize { self.share_threshold }
 	/// Returns the retention ratio.
@@ -95,6 +106,8 @@ impl BufferOptions {
 	}
 }
 
+/// A dynamically-resizing byte buffer which borrows and returns pool memory as
+/// needed.
 pub struct Buffer<P: SharedPool = DefaultPool> {
 	pool: P,
 	segments: SegmentRing,
@@ -114,6 +127,11 @@ impl<P: SharedPool> Debug for Buffer<P> {
 }
 
 impl Buffer {
+	/// Creates a new "lean" buffer. See [`BufferOptions::lean`] for details.
+	pub fn lean() -> Self {
+		Self::new_options(DefaultPool::get(), BufferOptions::lean())
+	}
+	
 	/// Creates a new buffer with `value`. Shorthand for:
 	///
 	/// ```no_run
@@ -373,6 +391,15 @@ impl<P: SharedPool> Buffer<P> {
 			Ok(count)
 		})
 	}
+	
+	/// Skips all remaining bytes. Unlike [`clear`][], free space will be retained
+	/// according to the [`retention_ratio`][].
+	/// 
+	/// [`clear`]: Self::clear
+	/// [`retention_ratio`]: BufferOptions::retention_ratio
+	pub fn skip_all(&mut self) -> Result<usize> {
+		self.skip(self.count())
+	}
 
 	/// Returns the index of a `char` in the buffer, or `None` if not found.
 	pub fn find_utf8_char(&self, char: char) -> Option<usize> {
@@ -559,6 +586,18 @@ impl<P: SharedPool> Buffer<P> {
 	pub(crate) fn read_std<W: Write>(&mut self, writer: &mut W, count: usize) -> Result<usize> {
 		self.read_segments(count, |seg| Ok(writer.write(seg)?))
 	}
+	
+	/// Inserts the contents of `other` at the start of this buffer. Used for seeking.
+	pub(crate) fn prefix_with(&mut self, other: &mut Buffer<impl SharedPool>) -> Result {
+		while let Some(seg) = other.segments.pop_front() {
+			self.segments.push_laden(seg)
+		}
+		
+		let tidy_self = self.tidy();
+		let tidy_other = other.tidy();
+		tidy_self?;
+		tidy_other
+	}
 }
 
 impl<P: SharedPool> Drop for Buffer<P> {
@@ -615,6 +654,34 @@ impl<P: SharedPool> Sink for Buffer<P> {
 	}
 
 	fn close_sink(&mut self) -> Result { self.close() }
+}
+
+impl<P: SharedPool> Seekable for Buffer<P> {
+	/// Seeks to an `offset` in the buffer by skipping, returning a new *effective
+	/// position*.
+	///
+	/// # Behavior
+	///
+	/// Since reading the buffer consumes bytes irreversibly, its seek position is
+	/// always zero. Seeking back is impossible, and will just return `0`. Seeking
+	/// returns the new position on other streams, but on buffers `0` would always
+	/// be returned. For consistency with other streams, an *effective position*,
+	/// one that would be returned for a stream at position `0` before seeking, is
+	/// returned. Seeking forward of by offset from start or end returns the number
+	/// of bytes skipped.
+	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
+		self.skip(
+			offset.to_pos(0, self.count())
+		).map_err(Error::with_op_seek)
+	}
+
+	/// Returns the [`count`][].
+	/// 
+	/// [`count`]: Buffer::count
+	fn seek_len(&mut self) -> Result<usize> { Ok(self.count()) }
+
+	/// Returns `0`.
+	fn seek_pos(&mut self) -> Result<usize> { Ok(0) }
 }
 
 impl<P: SharedPool> BufStream for Buffer<P> {

@@ -20,13 +20,15 @@ use amplify_derive::Display;
 use simdutf8::compat::Utf8Error;
 use OperationKind::{BufRead, BufWrite};
 use crate::{Buffer, ByteStr, ByteString, error, SEGMENT_SIZE};
-use crate::buffered_wrappers::{buffer_sink, buffer_source};
+use crate::buffered_wrappers::{buffer_sink, buffer_source, BufferedSink, BufferedSource};
 use crate::pool::{Error as PoolError, SharedPool};
 use crate::streams::codec::{Decode, Encode};
 use crate::streams::ErrorKind::{Closed, Eos, InvalidUTF8, Io, Other};
-use crate::streams::OperationKind::{BufClear, BufCompact, BufCopy, BufFlush};
+use crate::streams::OperationKind::{BufClear, BufCompact, BufCopy, BufFlush, Seek};
 
 pub mod codec;
+mod seeking;
+pub use seeking::*;
 
 pub type Error = error::Error<OperationKind, ErrorKind>;
 pub type Result<T = ()> = result::Result<T, Error>;
@@ -48,6 +50,8 @@ pub enum OperationKind {
 	BufFlush,
 	#[display("compact buffer")]
 	BufCompact,
+	#[display("seek")]
+	Seek,
 	#[display("{0}")]
 	Other(&'static str)
 }
@@ -137,6 +141,9 @@ impl Error {
 	/// Convenience shorthand for `with_operation(OperationKind::BufCompact)`.
 	pub fn with_op_buf_compact(self) -> Self { self.with_operation(BufCompact) }
 
+	/// Convenience shorthand for `with_operation(OperationKind::Seek)`.
+	pub fn with_op_seek(self) -> Self { self.with_operation(Seek) }
+
 	pub(crate) fn into_io(self) -> io::Error {
 		match self.kind {
 			Eos => io::Error::new(io::ErrorKind::UnexpectedEof, self),
@@ -170,7 +177,7 @@ pub trait Source {
 
 pub trait SourceBuffer: Source + Sized {
 	/// Wrap the source in a buffered source.
-	fn buffer(self) -> impl BufSource { buffer_source(self) }
+	fn buffer(self) -> BufferedSource<Self> { buffer_source(self) }
 }
 
 impl<S: Source> SourceBuffer for S { }
@@ -204,7 +211,7 @@ pub trait Sink {
 
 pub trait SinkBuffer: Sink + Sized {
 	/// Wrap the sink in a buffered sink.
-	fn buffer(self) -> impl BufSink { buffer_sink(self) }
+	fn buffer(self) -> BufferedSink<Self> { buffer_sink(self) }
 }
 
 impl<S: Sink> SinkBuffer for S { }

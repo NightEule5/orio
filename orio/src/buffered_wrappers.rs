@@ -15,7 +15,7 @@
 use ErrorKind::Eos;
 use crate::Buffer;
 use crate::pool::SharedPool;
-use crate::streams::{Sink, Source, Result, BufStream, BufSource, Error, BufSink, ErrorKind};
+use crate::streams::{Sink, Source, Result, BufStream, BufSource, Error, BufSink, ErrorKind, Seekable, SeekOffset, SeekableExt};
 use crate::streams::OperationKind::{BufFlush, BufRead};
 use crate::segment::SIZE;
 
@@ -108,6 +108,70 @@ impl<S: Source> BufSource for BufferedSource<S> {
 	}
 }
 
+impl<S: Source + Seekable> BufferedSource<S> {
+	fn seek_back(&mut self, off: usize) -> Result<usize> {
+		let cur_pos = self.seek_pos()?;
+		let mut new_pos = self.source.seek_back(off)?;
+		let count = cur_pos - new_pos;
+
+		if count == 0 {
+			return Ok(new_pos)
+		}
+
+		let mut seek_buf = Buffer::lean();
+		self.source
+			.read(&mut seek_buf, count)
+			.map_err(Error::with_op_seek)?;
+		self.buffer
+			.prefix_with(&mut seek_buf)
+			.map_err(Error::with_op_seek)?;
+		Ok(new_pos)
+	}
+
+	fn seek_forward(&mut self, mut off: usize) -> Result<usize> {
+		off -= self.buffer.skip(off)?;
+		self.source.seek_forward(off)
+	}
+}
+
+impl<S: Source + Seekable> Seekable for BufferedSource<S> {
+	fn seek(&mut self, mut offset: SeekOffset) -> Result<usize> {
+		return match offset {
+			SeekOffset::Forward(0) |
+			SeekOffset::Back   (0) => self.seek_pos(),
+			SeekOffset::Forward(off) => self.seek_forward(off),
+			SeekOffset::Back   (off) => self.seek_back   (off),
+			SeekOffset::FromEnd(_off @ ..=-1) => {
+				let len = self.buffer.count();
+				let pos = self.buffer.seek(offset)?;
+
+				if pos < len {
+					// We didn't seek through the entire buffer, just return the
+					// current position.
+					self.seek_pos()
+				} else {
+					// The buffer was exhausted, seek on the source.
+					self.source.seek(offset)
+				}
+			}
+			_ => {
+				// No clever way to do the rest, just invalidate the buffered data
+				// and seek on the source.
+				self.buffer.skip_all()?;
+				self.source.seek(offset)
+			}
+		}
+	}
+
+	fn seek_len(&mut self) -> Result<usize> { self.source.seek_len() }
+
+	fn seek_pos(&mut self) -> Result<usize> {
+		// Offset the source position back by the buffer length to account for
+		// buffering.
+		Ok(self.source.seek_pos()? - self.buffer.count())
+	}
+}
+
 impl<S: Source> Drop for BufferedSource<S> {
 	fn drop(&mut self) {
 		let _ = self.close_source();
@@ -168,6 +232,18 @@ impl<S: Sink> BufSink for BufferedSink<S> {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
 		source.read_all(self.buf_mut())
 			  .map_err(Error::with_op_buf_write)
+	}
+}
+
+impl<S: Sink + Seekable> Seekable for BufferedSink<S> {
+	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
+		// Todo: Is there some less naive approach than flushing then seeking?
+		self.flush().map_err(Error::with_op_seek)?;
+		self.sink.seek(offset)
+	}
+
+	fn seek_len(&mut self) -> Result<usize> {
+		Ok(self.buffer.count() + self.sink.seek_len()?)
 	}
 }
 

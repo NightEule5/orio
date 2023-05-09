@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt, io};
+use std::fmt;
 use std::error::Error as StdError;
 use std::fmt::{Debug, Display, Formatter};
 

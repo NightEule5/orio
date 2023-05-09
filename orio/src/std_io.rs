@@ -19,33 +19,78 @@ use crate::pool::SharedPool;
 use crate::streams::{BufSink, BufSource, BufStream, Error, Result, Seekable, SeekOffset, Sink, Source};
 use crate::streams::OperationKind::{BufFlush, Seek as SeekOp};
 
-default impl<R: Read> Source for R {
+trait AsInner {
+	type Inner;
+	fn as_inner(&mut self) -> &mut Self::Inner;
+}
+
+/// A [`Source`] reading from a wrapped [`Read`]er.
+pub struct ReaderSource<R: Read>(R);
+
+/// A [`Sink`] writing to a wrapped [`Write`]r.
+pub struct WriterSink<W: Write>(W);
+
+impl<R: Read> From<R> for ReaderSource<R> {
+	fn from(value: R) -> Self { Self(value) }
+}
+
+impl<W: Write> From<W> for WriterSink<W> {
+	fn from(value: W) -> Self { Self(value) }
+}
+
+impl<R: Read> AsInner for ReaderSource<R> {
+	type Inner = R;
+	fn as_inner(&mut self) -> &mut R {
+		let Self(reader) = self;
+		reader
+	}
+}
+
+impl<W: Write> AsInner for WriterSink<W> {
+	type Inner = W;
+	fn as_inner(&mut self) -> &mut W {
+		let Self(writer) = self;
+		writer
+	}
+}
+
+impl<R: Read> Source for ReaderSource<R> {
 	fn read(&mut self, sink: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize> {
-		sink.write_std(self, count)
+		let Self(reader) = self;
+		sink.write_std(reader, count)
 			.map_err(Error::with_op_buf_read)
 	}
 }
 
-default impl<W: Write> Sink for W {
+impl<W: Write> Sink for WriterSink<W> {
 	fn write(&mut self, source: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize> {
-		source.read_std(self, count)
+		let Self(writer) = self;
+		source.read_std(writer, count)
 			  .map_err(Error::with_op_buf_write)
 	}
 
 	fn flush(&mut self) -> Result {
-		Write::flush(self)
-			.map_err(|err| Error::io(BufFlush, err))
+		let Self(writer) = self;
+		writer.flush()
+			  .map_err(|err| Error::io(BufFlush, err))
 	}
 }
 
-default impl<S: Seek> Seekable for S {
+impl<T: AsInner<Inner: Seek>> Seekable for T {
 	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
 		Ok(
-			Seek::seek(self, offset.into_seek_from())
+			self.as_inner()
+				.seek(offset.into_seek_from())
 				.map_err(|err| Error::io(SeekOp, err))? as usize
 		)
 	}
 }
+
+/// A wrapper implementing the [`Read`] trait for [`Source`].
+pub struct SourceReader<S: Source>(S);
+
+/// A wrapper implementing the [`Write`] trait for [`Sink`].
+pub struct SinkWriter<S: Sink>(S);
 
 pub trait IntoRead: Source + Sized {
 	type Reader: Read + From<Self>;
@@ -64,14 +109,6 @@ default impl<S: Source> IntoRead for S {
 default impl<S: Sink> IntoWrite for S {
 	type Writer = SinkWriter<S>;
 }
-
-trait AsInner {
-	type Inner;
-	fn as_inner(&mut self) -> &mut Self::Inner;
-}
-
-/// A wrapper implementing the [`Read`] trait for [`Source`].
-pub struct SourceReader<S: Source>(S);
 
 impl<S: Source> From<S> for SourceReader<S> {
 	fn from(value: S) -> Self { Self(value) }
@@ -109,9 +146,6 @@ impl<S: Source> AsInner for SourceReader<S> {
 impl<S: Source + Seekable> Seek for SourceReader<S> {
 	fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> { bridge_seek_impl(self, pos) }
 }
-
-/// A wrapper implementing the [`Write`] trait for [`Sink`].
-pub struct SinkWriter<S: Sink>(S);
 
 impl<S: Sink> From<S> for SinkWriter<S> {
 	fn from(value: S) -> Self { Self(value) }

@@ -426,6 +426,24 @@ pub trait BufSink: BufStream + Sink {
 	}
 }
 
+/// Converts some type into a [`Source`].
+pub trait IntoSource<S: Source> {
+	fn into_source(self) -> S;
+}
+
+/// Converts some type into a [`Sink`].
+pub trait IntoSink<S: Sink> {
+	fn into_sink(self) -> S;
+}
+
+impl<S: Source, T: Into<S>> IntoSource<S> for T {
+	fn into_source(self) -> S { self.into() }
+}
+
+impl<S: Sink, T: Into<S>> IntoSink<S> for T {
+	fn into_sink(self) -> S { self.into() }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct OffsetUtf8Error {
 	inner: Utf8Error,

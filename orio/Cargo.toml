@@ -10,7 +10,18 @@ homepage = "https://github.com/NightEule5/orio/"
 repository = "https://github.com/NightEule5/orio/"
 
 [features]
+default = ["secure-hash"]
 shared-pool = []
+hash = ["dep:digest"]
+secure-hash = ["groestl", "sha2", "sha3", "shabal", "whirlpool"]
+broken-hash = ["md5", "sha1"]
+groestl = ["dep:groestl", "hash"]
+md5 = ["dep:md-5", "hash"]
+sha1 = ["dep:sha1", "hash"]
+sha2 = ["dep:sha2", "hash"]
+sha3 = ["dep:sha3", "hash"]
+shabal = ["dep:shabal", "hash"]
+whirlpool = ["dep:whirlpool", "hash"]
 
 [dependencies]
 amplify_derive = "2.11.3"
@@ -20,6 +31,14 @@ cfg-if = "1.0.0"
 itertools = "0.10.5"
 once_cell = "1.17.1"
 simdutf8 = "0.1.4"
+groestl = { version = "0.10.1", optional = true }
+md-5 = { version = "0.10.5", optional = true }
+sha1 = { version = "0.10.5", optional = true }
+sha2 = { version = "0.10.6", optional = true }
+sha3 = { version = "0.10.8", optional = true }
+shabal = { version = "0.4.1", optional = true }
+whirlpool = { version = "0.10.4", optional = true }
+digest = { version = "0.10.6", optional = true, features = ["std"] }
 
 [dev-dependencies]
 quickcheck = "1.0.3"

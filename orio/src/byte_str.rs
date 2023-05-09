@@ -289,6 +289,108 @@ impl ByteString {
 	pub(crate) fn as_slice(&self) -> &[u8] { self.data.as_slice() }
 }
 
+#[cfg(feature = "hash")]
+impl ByteStr<'_> {
+	pub fn hash(&self, mut digest: impl digest::Digest) -> ByteString {
+		for data in &*self.data {
+			digest.update(data)
+		}
+		digest.finalize().as_slice().into()
+	}
+}
+
+#[cfg(feature = "hash")]
+impl ByteString {
+	pub fn hash(&self, mut digest: impl digest::Digest) -> Self {
+		digest.update(&self.data);
+		digest.finalize().as_slice().into()
+	}
+}
+
+macro_rules! hash_fn {
+    (secure $name:literal$fn:ident$module:ident$hasher:ident) => {
+		/// Computes a
+		#[doc = $name]
+		/// hash of the byte string. There are no known attacks for this hash
+		/// function; it can be considered suitable for cryptography.
+		pub fn $fn(&self) -> ByteString {
+			self.hash($module::$hasher::default())
+		}
+	};
+    (broken $name:literal$fn:ident$module:ident$hasher:ident) => {
+		/// Computes a
+		#[doc = $name]
+		/// hash of the byte string. This hash function has been broken; its use in
+		/// cryptography is ***not*** secure. Use for checksums only.
+		pub fn $fn(&self) -> ByteString {
+			self.hash($module::$hasher::default())
+		}
+	};
+}
+
+macro_rules! hash {
+    ($sec:tt$feature:literal$module:ident
+	$($size_name:literal$size_fn:ident$size_hasher:ident)+
+	) => {
+		#[cfg(feature = $feature)]
+		impl ByteString {
+			$(hash_fn! { $sec$size_name$size_fn$module$size_hasher })+
+		}
+		#[cfg(feature = $feature)]
+		impl ByteStr<'_> {
+			$(hash_fn! { $sec$size_name$size_fn$module$size_hasher })+
+		}
+	};
+}
+
+hash! {
+	secure "groestl" groestl
+	"Grøstl-224" groestl224 Groestl224
+	"Grøstl-256" groestl256 Groestl256
+	"Grøstl-384" groestl384 Groestl384
+	"Grøstl-512" groestl512 Groestl512
+}
+
+hash! {
+	broken "md5" md5
+	"MD5" md5 Md5
+}
+
+hash! {
+	broken "sha1" sha1
+	"SHA1" sha1 Sha1
+}
+
+hash! {
+	secure "sha2" sha2
+	"SHA-224" sha224 Sha224
+	"SHA-256" sha256 Sha256
+	"SHA-384" sha384 Sha384
+	"SHA-512" sha512 Sha512
+}
+
+hash! {
+	secure "sha3" sha3
+	"SHA3-224 (Keccak)" sha3_224 Sha3_224
+	"SHA3-256 (Keccak)" sha3_256 Sha3_256
+	"SHA3-384 (Keccak)" sha3_384 Sha3_384
+	"SHA3-512 (Keccak)" sha3_512 Sha3_512
+}
+
+hash! {
+	secure "shabal" shabal
+	"Shabal-192" shabal192 Shabal192
+	"Shabal-224" shabal224 Shabal224
+	"Shabal-256" shabal256 Shabal256
+	"Shabal-384" shabal384 Shabal384
+	"Shabal-512" shabal512 Shabal512
+}
+
+hash! {
+	secure "whirlpool" whirlpool
+	"Whirlpool" whirlpool Whirlpool
+}
+
 impl<'b> PartialEq<ByteStr<'b>> for ByteString {
 	fn eq(&self, other: &ByteStr<'b>) -> bool {
 		other == self.as_slice()

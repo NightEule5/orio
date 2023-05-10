@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cell::{RefCell, RefMut};
-use std::ops::DerefMut;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::result;
 use amplify_derive::Display;
@@ -208,6 +208,35 @@ impl Pool for BasicPool {
 	fn shed(&mut self) {
 		self.segments.clear();
 	}
+}
+
+/// A [`Pool`] implementation with no storage. Instead, collected segments are
+/// dropped and claimed segments are created on-demand.
+#[derive(Copy, Clone, Default)]
+pub struct VoidPool;
+
+impl Deref for VoidPool {
+	type Target = Self;
+
+	fn deref(&self) -> &Self { self }
+}
+
+impl DerefMut for VoidPool {
+	fn deref_mut(&mut self) -> &mut Self { self }
+}
+
+impl Pool for VoidPool {
+	fn claim_one(&mut self) -> Segment { Segment::default() }
+
+	fn collect_one(&mut self, _: Segment) { }
+
+	fn shed(&mut self) { }
+}
+
+impl SharedPool for VoidPool {
+	fn get() -> Self { Self }
+
+	fn lock(&self) -> Result<Self> { Ok(*self) }
 }
 
 #[thread_local]

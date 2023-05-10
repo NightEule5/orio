@@ -28,7 +28,10 @@ use crate::streams::OperationKind::{BufClear, BufCompact, BufCopy, BufFlush, See
 
 pub mod codec;
 mod seeking;
+mod void;
+
 pub use seeking::*;
+pub use void::*;
 
 pub type Error = error::Error<OperationKind, ErrorKind>;
 pub type Result<T = ()> = result::Result<T, Error>;

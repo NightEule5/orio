@@ -286,7 +286,8 @@ impl ByteString {
 		}
 	}
 
-	pub(crate) fn as_slice(&self) -> &[u8] { self.data.as_slice() }
+	/// Returns the internal data as a slice of bytes.
+	pub fn as_slice(&self) -> &[u8] { self.data.as_slice() }
 }
 
 #[cfg(feature = "hash")]
@@ -427,6 +428,10 @@ impl FromIterator<u8> for ByteString {
 			.collect::<Vec<_>>()
 			.into()
 	}
+}
+
+impl AsRef<[u8]> for ByteString {
+	fn as_ref(&self) -> &[u8] { &self.data }
 }
 
 impl Extend<u8> for ByteString {

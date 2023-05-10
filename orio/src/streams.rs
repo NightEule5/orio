@@ -426,6 +426,26 @@ pub trait BufSink: BufStream + Sink {
 	}
 }
 
+// Impls
+
+impl Source for &[u8] {
+	fn read(&mut self, sink: &mut Buffer<impl SharedPool>, mut count: usize) -> Result<usize> {
+		count = min(count, self.len());
+		(&self[..count]).read_all(sink)?;
+		*self = &self[count..];
+		Ok(count)
+	}
+
+	fn read_all(&mut self, sink: &mut Buffer<impl SharedPool>) -> Result<usize> {
+		sink.write_from_slice(self).map_err(Error::with_op_buf_read)?;
+		let len = self.len();
+		*self = &self[len..];
+		Ok(len)
+	}
+}
+
+// Into
+
 /// Converts some type into a [`Source`].
 pub trait IntoSource<S: Source> {
 	fn into_source(self) -> S;

@@ -54,6 +54,7 @@ impl SegmentRing {
 	pub(crate) fn void(&self, threshold: usize) -> bool {
 		if threshold == 0 { return true }
 		if self.count == 0 { return false }
+		if self.length == 0 { return false }
 
 		let last = self.length - 1;
 		let mut voids = self.iter()
@@ -184,7 +185,9 @@ impl SegmentRing {
 		if !self.has_empty() { return }
 
 		let Self { ring, length, limit, .. } = self;
-		*limit -= (ring.len() - min(*length, count)) * SIZE;
+		*limit = limit.saturating_sub(
+			(ring.len() - min(*length, count)) * SIZE
+		);
 		pool.collect(ring.drain(*length..).take(count));
 	}
 

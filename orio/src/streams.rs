@@ -19,7 +19,7 @@ use std::fmt::{Display, Formatter};
 use amplify_derive::Display;
 use simdutf8::compat::Utf8Error;
 use OperationKind::{BufRead, BufWrite};
-use crate::{Buffer, ByteStr, ByteString, error, SEGMENT_SIZE};
+use crate::{Buffer, BufferOptions, ByteStr, ByteString, error, SEGMENT_SIZE};
 use crate::buffered_wrappers::{buffer_sink, buffer_source, BufferedSink, BufferedSource};
 use crate::pool::{Error as PoolError, SharedPool};
 use crate::streams::codec::{Decode, Encode};
@@ -180,7 +180,13 @@ pub trait Source {
 
 pub trait SourceBuffer: Source + Sized {
 	/// Wrap the source in a buffered source.
-	fn buffer(self) -> BufferedSource<Self> { buffer_source(self) }
+	fn buffer(self) -> BufferedSource<Self> {
+		self.buffer_with(BufferOptions::default())
+	}
+
+	fn buffer_with(self, options: BufferOptions) -> BufferedSource<Self> {
+		buffer_source(self, options)
+	}
 }
 
 impl<S: Source> SourceBuffer for S { }

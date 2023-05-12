@@ -13,14 +13,14 @@
 // limitations under the License.
 
 use ErrorKind::Eos;
-use crate::Buffer;
-use crate::pool::SharedPool;
+use crate::{Buffer, BufferOptions};
+use crate::pool::{DefaultPool, SharedPool};
 use crate::streams::{Sink, Source, Result, BufStream, BufSource, Error, BufSink, ErrorKind, Seekable, SeekOffset, SeekableExt};
 use crate::streams::OperationKind::{BufFlush, BufRead};
 use crate::segment::SIZE;
 
-pub fn buffer_source<S: Source>(source: S) -> BufferedSource<S> {
-	BufferedSource::new(source)
+pub fn buffer_source<S: Source>(source: S, options: BufferOptions) -> BufferedSource<S> {
+	BufferedSource::new(source, options)
 }
 
 pub fn buffer_sink<S: Sink>(sink: S) -> BufferedSink<S> {
@@ -38,9 +38,9 @@ pub struct BufferedSource<S: Source> {
 }
 
 impl<S: Source> BufferedSource<S> {
-	fn new(source: S) -> Self {
+	fn new(source: S, options: BufferOptions) -> Self {
 		Self {
-			buffer: Buffer::default(),
+			buffer: Buffer::new_options(DefaultPool::get(), options),
 			source,
 			closed: false,
 		}
@@ -51,8 +51,7 @@ impl<S: Source> BufferedSource<S> {
 	/// Fills the buffer, rounding up to the nearest segment size.
 	fn fill_buf(&mut self, mut byte_count: usize) -> Result<bool> {
 		let count = self.buffer.count();
-		let seg_count = (count + byte_count + SIZE - 1) / SIZE;
-		byte_count = seg_count * SIZE - count;
+		byte_count = (count + byte_count).next_multiple_of(SIZE) - count;
 
 		let cnt = self.source
 					  .read(&mut self.buffer, byte_count)

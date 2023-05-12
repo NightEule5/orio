@@ -56,6 +56,7 @@
 	drain_filter,
 	extend_one,
 	generic_const_exprs,
+	int_roundings,
 	return_position_impl_trait_in_trait,
 	seek_stream_len,
 	slice_range,

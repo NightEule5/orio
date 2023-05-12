@@ -12,8 +12,75 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::{RefCell, RefMut};
+use std::ops::DerefMut;
+use std::rc::Rc;
+use quickcheck_macros::quickcheck;
+use orio::{Buffer, pool, Segment, SEGMENT_SIZE};
+use orio::pool::{BasicPool, Pool, SharedPool};
+use orio::streams::{BufSink, BufSource};
+
 #[macro_use]
 mod common;
+
+#[derive(Default)]
+struct InnerMockPool {
+
+	count: usize
+}
+
+#[derive(Clone, Default)]
+struct MockPool {
+	inner: Rc<RefCell<InnerMockPool>>
+}
+
+impl Pool for InnerMockPool {
+	fn claim_one(&mut self) -> Segment {
+		self.count += 1;
+		Segment::default()
+	}
+
+	fn collect_one(&mut self, _: Segment) {
+		self.count -= 1;
+	}
+
+	fn shed(&mut self) { }
+}
+
+impl SharedPool for MockPool {
+	fn get() -> Self { unimplemented!() }
+
+	fn lock(&self) -> pool::Result<RefMut<'_, InnerMockPool>> { Ok(self.inner.borrow_mut()) }
+}
+
+#[quickcheck]
+fn count(data: Vec<u8>) {
+	let buffer = Buffer::from_slice(&data).unwrap();
+	assert_eq!(buffer.count(), data.len())
+}
+
+#[quickcheck]
+fn clear(data: Vec<u8>) {
+	let pool = MockPool::default();
+	{
+		let mut buffer = Buffer::new(pool.clone());
+		buffer.write_from_slice(&data).unwrap();
+		buffer.clear().unwrap();
+	}
+	assert_eq!(
+		Rc::into_inner(pool.inner)
+			.unwrap()
+			.into_inner()
+			.count,
+		0
+	);
+}
+
+#[quickcheck]
+fn request(data: Vec<u8>) {
+	let mut buffer = Buffer::from_slice(&data).unwrap();
+	assert!(buffer.request(data.len()).unwrap());
+}
 
 mod write {
 	use quickcheck_macros::quickcheck;

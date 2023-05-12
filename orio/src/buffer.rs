@@ -18,7 +18,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{Read, Write};
 use std::ops::RangeBounds;
 use simdutf8::compat::from_utf8;
-use crate::pool::{DefaultPool, Pool, SharedPool};
+use crate::pool::{SharedPool, DefaultPool, Pool};
 use crate::segment::{Segment, SegmentRing};
 use crate::{ByteStr, ByteString, expect, SEGMENT_SIZE};
 use crate::streams::{BufSink, BufSource, BufStream, Error, OffsetUtf8Error, Result, Seekable, SeekOffset, Sink, Source};
@@ -573,6 +573,10 @@ impl<P: SharedPool> Buffer<P> {
 			} else {
 				segments.push_laden(seg);
 			}
+
+			if n == 0 {
+				break
+			}
 		}
 
 		self.tidy().map_err(Error::with_op_buf_write)?;
@@ -879,7 +883,7 @@ impl<P: SharedPool> BufSink for Buffer<P> {
 		while !value.is_empty() {
 			self.write_segments(value.len(), |seg| {
 				let n = min(seg.len(), value.len());
-				seg.copy_from_slice(value);
+				seg.copy_from_slice(&value[..n]);
 				value = &value[n..];
 				Ok(n)
 			})?;

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use std::cmp::min;
-use std::ops::Add;
+use std::ops::{Add, RangeBounds};
+use std::slice;
 use base64::Engine;
 use base64::engine::GeneralPurpose;
 use base64::prelude::{BASE64_STANDARD_NO_PAD, BASE64_URL_SAFE_NO_PAD};
@@ -288,6 +289,17 @@ impl ByteString {
 
 	/// Returns the internal data as a slice of bytes.
 	pub fn as_slice(&self) -> &[u8] { self.data.as_slice() }
+
+	/// Returns a slice of the byte string bounded by `range`.
+	pub fn substr<R: RangeBounds<usize>>(&self, range: R) -> ByteStr<'_> {
+		let range = slice::range(range, ..self.len());
+		let slice = &self.as_slice()[range];
+		ByteStr {
+			utf8: None,
+			data: vec![slice],
+			len: slice.len(),
+		}
+	}
 }
 
 #[cfg(feature = "hash")]

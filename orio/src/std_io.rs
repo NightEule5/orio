@@ -16,7 +16,7 @@ use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 use crate::Buffer;
 use crate::pool::SharedPool;
-use crate::streams::{BufSink, BufSource, BufStream, Error, Result, Seekable, SeekOffset, Sink, Source};
+use crate::streams::{BufSink, BufSource, Error, Result, Seekable, SeekOffset, Sink, Source};
 use crate::streams::OperationKind::{BufFlush, Seek as SeekOp};
 
 trait AsInner {

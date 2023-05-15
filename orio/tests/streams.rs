@@ -12,36 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 mod dataset;
 
 mod hash_canterbury {
 	use std::error::Error;
 	use std::fs::File;
+	use std::path::PathBuf;
 	use orio::{BufferOptions, ByteString, ReaderSource};
 	use orio::streams::{BufSource, SourceBuffer};
-	use crate::dataset::{Data, DATASET};
+	use crate::corpus_test;
 
-	macro_rules! gen {
-    	($($data:ident)+) => {
-			$(
-			#[test]
-			fn $data() {
-				hash(DATASET.$data).unwrap()
-			}
-			)+
-		};
-	}
+	corpus_test! { hash }
 
-	gen! {
-		alice29 asyoulik cp fields grammar kennedy lcet10 plrabn12 ptt5 sum xargs
-	}
-
-	fn hash(data: Data) -> Result<(), Box<dyn Error>> {
-		let Data { size, sha2, .. } = data;
+	fn hash(path: PathBuf, size: usize, sha2: &str) -> Result<(), Box<dyn Error>> {
 		let hash = ByteString::from(base16ct::lower::decode_vec(sha2)?);
 		let mut source = {
-			let file = File::open(data.path())?;
+			let file = File::open(path)?;
 			ReaderSource::from(file).buffer_with(
 				BufferOptions::default()
 					.set_compact_threshold(usize::MAX)

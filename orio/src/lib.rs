@@ -62,6 +62,7 @@
 	slice_range,
 	specialization,
 	thread_local,
+	try_blocks,
 	type_alias_impl_trait,
 )]
 #![feature(io_error_other)]

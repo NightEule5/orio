@@ -19,8 +19,7 @@ use base64::Engine;
 use base64::engine::GeneralPurpose;
 use base64::prelude::{BASE64_STANDARD_NO_PAD, BASE64_URL_SAFE_NO_PAD};
 use simdutf8::compat::{from_utf8, Utf8Error};
-use crate::Segment;
-use crate::segment::SegmentRing;
+use crate::segment::SegRing;
 use crate::streams::OffsetUtf8Error;
 
 /// A borrowed, segmented string of bytes.
@@ -199,11 +198,11 @@ impl<'b> From<&'b [u8]> for ByteStr<'b> {
 	}
 }
 
-impl<'b> From<&'b SegmentRing> for ByteStr<'b> {
-	fn from(value: &'b SegmentRing) -> Self {
+impl<'b> From<&'b SegRing> for ByteStr<'b> {
+	fn from(value: &'b SegRing) -> Self {
 		Self {
 			utf8: None,
-			data: value.iter().map(Segment::data).collect(),
+			data: value.slices().collect(),
 			len: value.count(),
 		}
 	}

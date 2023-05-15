@@ -110,7 +110,7 @@ impl<S: Source> BufSource for BufferedSource<S> {
 impl<S: Source + Seekable> BufferedSource<S> {
 	fn seek_back(&mut self, off: usize) -> Result<usize> {
 		let cur_pos = self.seek_pos()?;
-		let mut new_pos = self.source.seek_back(off)?;
+		let new_pos = self.source.seek_back(off)?;
 		let count = cur_pos - new_pos;
 
 		if count == 0 {
@@ -134,7 +134,7 @@ impl<S: Source + Seekable> BufferedSource<S> {
 }
 
 impl<S: Source + Seekable> Seekable for BufferedSource<S> {
-	fn seek(&mut self, mut offset: SeekOffset) -> Result<usize> {
+	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
 		return match offset {
 			SeekOffset::Forward(0) |
 			SeekOffset::Back   (0) => self.seek_pos(),

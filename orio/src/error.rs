@@ -26,6 +26,22 @@ pub trait ErrorKind: Copy + Debug + Display {
 	fn other(message: &'static str) -> Self;
 }
 
+pub(crate) trait MapOp<T, O: OperationKind> {
+	fn map_op(self, op: O) -> Self;
+}
+
+impl<T, O: OperationKind, E: ErrorKind> MapOp<T, O> for Result<T, Error<O, E>> {
+	fn map_op(mut self, op: O) -> Self {
+		match self {
+			Err(ref mut err) => {
+				err.op = op;
+				self
+			}
+			ok => ok
+		}
+	}
+}
+
 #[derive(Debug)]
 pub struct Error<O: OperationKind, E: ErrorKind> {
 	op: O,

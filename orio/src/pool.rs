@@ -90,7 +90,7 @@ pub trait Pool: Sized {
 
 	/// Claims many segments into the container, at least `min_size` in total size.
 	fn claim_size(&mut self, target: &mut impl Extend<Segment>, min_size: usize) {
-		let count = min_size / SEGMENT_SIZE + (min_size % SEGMENT_SIZE > 0) as usize;
+		let count = min_size.next_multiple_of(SEGMENT_SIZE) / SEGMENT_SIZE;
 
 		self.claim_count(target, count)
 	}

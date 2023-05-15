@@ -120,3 +120,23 @@ pub static DATASET: Dataset = Dataset {
 	sum		: Data::new("sum",			38_240,		Dataset::     SUM_HASH),
 	xargs	: Data::new("xargs.1",		4_227,		Dataset::   XARGS_HASH),
 };
+
+#[macro_export]
+macro_rules! corpus_test {
+	($test:ident) => {
+		corpus_test! {
+			alice29 asyoulik cp fields grammar kennedy lcet10 plrabn12 ptt5 sum xargs; $test
+		}
+	};
+	($($data:ident)+;$test:ident) => {
+		$(
+		#[test]
+		fn $data() {
+			let data = crate::dataset::DATASET.$data;
+			let path = data.path();
+			let crate::dataset::Data { size, sha2, .. } = data;
+			$test(path, size, sha2).unwrap()
+		}
+		)+
+	};
+}

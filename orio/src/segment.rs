@@ -16,12 +16,16 @@ mod memory;
 
 use std::collections::VecDeque;
 use std::cmp::min;
-use itertools::FoldWhile::{Continue, Done};
+use std::iter::Sum;
+use std::ops::RangeBounds;
+use std::slice;
 use itertools::Itertools;
 use crate::pool::Pool;
 use memory::Memory;
 
 pub const SIZE: usize = 8 * 1024;
+
+// Todo: count fragmentation after reading as well as after writing.
 
 /// A ring buffer of [`Segment`]s. Written segments are placed in sequence at the
 /// front, empty segments at the back. While reading, segments are popped front to
@@ -29,195 +33,336 @@ pub const SIZE: usize = 8 * 1024;
 /// segments are popped from the back and written segments are inserted after the
 /// last written segment.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SegmentRing {
+pub(crate) struct SegRing {
 	/// The backing ring buffer.
 	ring: VecDeque<Segment>,
 	/// The number of written segments.
-	length: usize,
-	/// The number of elements that can be written before the buffer is full.
+	len: usize,
+	/// The number of bytes that can be written before the buffer is full.
 	limit: usize,
-	/// The number of elements in the buffer.
+	/// The number of bytes in the buffer.
 	count: usize,
+	/// The degree of fragmentation, measuring the total free space locked between
+	/// partially written segments.
+	frag: usize,
 }
 
-impl SegmentRing {
-	/// Returns the number of elements contained in all segments.
-	pub fn count(&self) -> usize { self.count }
-	/// Returns the number of elements that can be written to the segments before
-	/// the next claim operation.
+impl SegRing {
+	/// Returns the number of segments written.
+	pub fn len(&self) -> usize { self.len }
+	/// Returns the number of bytes that can be written before claiming.
 	pub fn limit(&self) -> usize { self.limit }
-	/// Returns the number of written segments.
-	pub(crate) fn len(&self) -> usize { self.length }
-	/// Returns `true` if the buffer has no elements.
-	pub fn is_empty(&self) -> bool { self.length == 0 }
-	/// Returns `true` if the total void size exceeds `threshold`.
-	pub(crate) fn void(&self, threshold: usize) -> bool {
-		if threshold == 0 { return true }
-		if self.count == 0 { return false }
-		if self.length == 0 { return false }
+	/// Returns the number of bytes written.
+	pub fn count(&self) -> usize { self.count }
+	/// Returns the degree of fragmentation.
+	pub fn frag(&self) -> usize { self.frag }
 
-		let last = self.length - 1;
-		let mut voids = self.iter()
-							.enumerate()
-							.map(|(i, seg)|
-								seg.mem.off() + if i < last {
-									seg.limit()
-								} else {
-									0
-								}
-							);
+	/// Returns `true` if no data is written.
+	pub fn is_empty(&self) -> bool { self.count == 0 }
+	/// Returns `true` if data is written.
+	pub fn is_not_empty(&self) -> bool { self.count > 0 }
+	/// Returns `true` if the deque contains empty segments.
+	fn has_empty(&self) -> bool { self.len < self.ring.len() }
+	/// Returns a count of empty segments in the deque.
+	fn empty_count(&self) -> usize { self.ring.len() - self.len }
 
-		// Abort as soon as the sum exceeds the threshold, to avoid iterating all
-		// segments unnecessarily.
-		voids.fold_while(0, |mut sum, cur| {
-			sum += cur;
-			if sum < threshold {
-				Continue(sum)
-			} else {
-				Done(sum)
-			}
-		}).is_done()
+	/// Returns the last non-empty segment, if any.
+	pub fn last(&self) -> Option<&Segment> {
+		if self.is_empty() {
+			None
+		} else {
+			Some(&self.ring[self.len - 1])
+		}
 	}
 
-	/// Pushes to the front of the buffer. Used for reading in case a segment can
-	/// only be partially read.
+	/// Pushes a partially read segment to the front of the deque.
 	pub fn push_front(&mut self, seg: Segment) {
+		if seg.is_empty() {
+			self.push_empty(seg);
+			return
+		}
+
+		self.len += 1;
 		self.count += seg.len();
-		self.length += 1;
+
+		if self.is_empty() {
+			self.limit += seg.limit();
+		} else {
+			self.frag += seg.limit();
+		}
+
 		self.ring.push_front(seg);
 	}
 
-	/// Pushes an empty segment to the back of the buffer.
-	pub fn push_empty(&mut self, seg: Segment) {
-		debug_assert!(seg.is_empty(), "only empty segments should be pushed to the back");
+	/// Pushes a written or empty segment to the back of the deque.
+	pub fn push_back(&mut self, seg: Segment) {
+		if seg.is_empty() {
+			self.push_empty(seg);
+		} else {
+			self.push_laden(seg);
+		}
+	}
+
+	fn push_empty(&mut self, seg: Segment) {
 		self.limit += SIZE;
 		self.ring.push_back(seg);
 	}
 
-	/// Inserts a written segment after the last in the buffer.
-	pub fn push_laden(&mut self, seg: Segment) {
-		assert!(!seg.is_empty(), "only laden segments should be inserted");
-		let lim_change = self.get().map(Segment::limit).unwrap_or_default();
-		let Self { ring, length, limit, count } = self;
-
-		*limit -= lim_change;
-		*limit += seg.limit();
-		*count += seg.len();
-		ring.insert(*length, seg);
-		*length += 1;
+	fn push_laden(&mut self, seg: Segment) {
+		let last_lim = self.last().map(Segment::limit).unwrap_or_default();
+		self.limit -= last_lim;
+		self.frag += last_lim;
+		self.limit += seg.limit();
+		self.count += seg.len();
+		self.ring.insert(self.len, seg);
+		self.len += 1;
 	}
 
-	/// Pops the back-most unfilled segment from the ring buffer. Used for writing.
-	pub fn pop_back(&mut self) -> Option<Segment> {
-		let seg = if self.has_empty() {
-			// Faster to replace the popped segment with a fresh one from the back
-			// if possible.
-			self.ring.swap_remove_back(self.length)?
-		} else {
-			self.ring.pop_back()?
-		};
-
-		let Self { length, limit, count, .. } = self;
-		*length -= 1;
-		*count -= seg.len();
-		*limit -= seg.limit();
-		Some(seg)
-	}
-
-	/// Pops the front segment from the ring buffer. Used for reading.
+	/// Pops the front segment from the deque for reading.
 	pub fn pop_front(&mut self) -> Option<Segment> {
 		if self.is_empty() { return None }
 
-		let Self { length, count, .. } = *self;
 		let seg = self.ring.pop_front()?;
 
-		debug_assert!(length > 0, "no segments after successful pop");
-		debug_assert!(
-			count >= seg.len(),
-			"count ({count}) not large enough to contain the popped segment with \
-			count {}",
-			seg.len()
-		);
+		if self.is_empty() {
+			self.limit -= seg.limit();
+		} else {
+			self.frag -= seg.limit();
+		}
 
-		self.length -= 1;
+		self.len -= 1;
 		self.count -= seg.len();
 		Some(seg)
 	}
 
-	pub fn extend_empty(&mut self, segments: impl IntoIterator<Item = Segment>) {
-		let len = self.ring.len();
-		self.ring.extend(segments);
-		let count = self.ring.len() - len;
+	/// Pops the back-most unfilled segment from the deque for writing.
+	pub fn pop_back(&mut self) -> Option<Segment> {
+		let seg = if self.has_empty() {
+			// Faster to replace the popped segment with a fresh one from the back
+			// if possible.
+			self.ring.swap_remove_back(self.len)?
+		} else {
+			self.ring.pop_back()?
+		};
 
-		self.limit += count * SIZE;
+		self.len += 1;
+		self.limit -= seg.limit();
+		self.count -= seg.len();
+		Some(seg)
 	}
 
-	/// Iterates over written segments front to back.
-	pub fn iter(&self) -> impl Iterator<Item = &Segment> {
-		self.ring
-			.iter()
-			.take(self.length)
+	/// Reads segments from the front of the deque, rotating empty segments to the
+	/// back.
+	pub fn read<T>(
+		&mut self,
+		read: impl FnOnce(&mut [Segment]) -> T
+	) -> T {
+		if self.is_empty() {
+			return read(&mut [])
+		}
+
+		#[derive(Debug, Default)]
+		struct Snapshot {
+			count: usize,
+			limit: usize
+		}
+
+		impl Sum for Snapshot {
+			fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+				iter.reduce(|mut sum, Snapshot { count, limit }| {
+					sum.count += count;
+					sum.limit += limit;
+					sum
+				}).unwrap_or_default()
+			}
+		}
+
+		impl Snapshot {
+			fn take(segments: &[Segment]) -> Vec<Snapshot> {
+				segments.iter()
+						.map(|seg|
+							Self {
+								count: seg.len(),
+								limit: seg.limit()
+							}
+						)
+						.collect()
+			}
+		}
+
+		let (mut front, _) = self.ring.as_mut_slices();
+		front = &mut front[..self.len];
+
+		let mut snap = Snapshot::take(front);
+		let result = read(front);
+
+		let n = front.iter()
+					 .take_while(|seg| Segment::is_empty(seg))
+					 .count();
+
+		// If all segments were read, remove the last segment's limit from the
+		// total and its "snapshot".
+		if self.len > 0 && n == self.len {
+			let ref mut last = snap[n - 1];
+			self.limit -= last.limit;
+			last.limit = 0;
+		}
+
+		let Snapshot { count, limit } = snap.into_iter().take(n).sum();
+		self.count -= count;
+		self.frag -= limit;
+		self.consume_front(n);
+
+		result
+	}
+
+	fn consume_front(&mut self, count: usize) {
+		self.len -= count;
+		self.limit += count * SIZE;
+		self.ring.rotate_left(count);
+	}
+
+	/// Writes to segments from the back of the deque, rotating full segments to
+	/// the front.
+	pub fn write<T>(
+		&mut self,
+		write: impl FnOnce(&mut [Segment]) -> T
+	) -> T {
+		let mut empty_count = self.empty_count();
+		let count = {
+			let mut len = 0;
+			if let Some(last) = self.last() {
+				if !last.is_full() {
+					empty_count += 1;
+					len = last.len();
+				}
+			}
+			len
+		};
+		self.limit += count;
+		self.count -= count;
+
+		self.ring.rotate_right(empty_count);
+		self.limit -= empty_count * SIZE;
+
+		let (mut front, _) = self.ring.as_mut_slices();
+		front = &mut front[..empty_count];
+		let result = write(front);
+
+		let len = front.iter()
+					   .position(|seg| seg.is_empty())
+					   .unwrap_or(front.len());
+		self.len = len;
+		for (i, seg) in front[..len].iter().enumerate() {
+			if i < len.saturating_sub(1) {
+				self.frag += seg.limit();
+			}
+			self.count += seg.len();
+		}
+
+		self.limit += if len == 0 { 0 } else { front[len - 1].limit() };
+		self.limit += (front.len() - len) * SIZE;
+
+		let rot = front.len();
+		self.ring.rotate_left(rot);
+
+		result
 	}
 
 	/// Reserves at least `count` bytes of segments, increasing [`Self::limit`] to
 	/// `[n,n+N)`.
-	pub fn reserve(&mut self, mut count: usize, pool: &mut impl Pool) {
-		let Self { ring, .. } = self;
+	pub fn reserve(&mut self, count: usize, pool: &mut impl Pool) {
+		pool.claim_size(self, count.saturating_sub(self.limit))
+	}
+	
+	/// Clears and collects all segments into `pool`.
+	pub fn clear(&mut self, pool: &mut impl Pool) {
+		pool.collect(
+			self.ring
+				.drain(..)
+				.update(Segment::clear)
+		)
+	}
+
+	/// Collects up to `count` empty segments into `pool`.
+	pub fn trim(&mut self, mut count: usize, pool: &mut impl Pool) {
+		count = min(count, self.empty_count());
+		if count == 0 { return }
+
+		self.limit = count * SIZE;
+		let len = self.len;
+		pool.collect(self.ring.drain(len..len + count));
+	}
+
+	/// Iterates over written segments.
+	pub fn iter(&self) -> impl Iterator<Item = &Segment> {
+		self.ring
+			.iter()
+			.take(self.len)
+	}
+
+	/// Iterates over written segments a slices.
+	pub fn slices(&self) -> impl Iterator<Item = &[u8]> {
+		self.iter()
+			.map(|s| s.data(..))
+	}
+}
+
+impl Extend<Segment> for SegRing {
+	fn extend<T: IntoIterator<Item = Segment>>(&mut self, iter: T) {
+		let Self { ring, limit, .. } = self;
 		let len = ring.len();
 
-		pool.claim_size(ring, count);
+		ring.extend(iter);
 
-		count = ring.len() - len;
-		self.limit += count * SIZE;
-	}
-
-	/// Collects all segments into `pool`.
-	pub fn clear(&mut self, pool: &mut impl Pool) {
-		let Self { ring, length, limit, count } = self;
-		pool.collect(ring.drain(..));
-		*length = 0;
-		*limit = 0;
-		*count = 0;
-	}
-
-	/// Collects empty segments into `pool`.
-	pub fn trim(&mut self, pool: &mut impl Pool, count: usize) {
-		if !self.has_empty() { return }
-
-		let Self { ring, length, limit, .. } = self;
-		*limit = limit.saturating_sub(
-			(ring.len() - min(*length, count)) * SIZE
-		);
-		pool.collect(ring.drain(*length..).take(count));
-	}
-
-	fn has_empty(&self) -> bool { self.length < self.ring.len() }
-
-	fn get(&self) -> Option<&Segment> {
-		(!self.is_empty()).then(|| &self.ring[self.length])
-	}
-}
-
-impl IntoIterator for SegmentRing {
-	type Item = Segment;
-	type IntoIter = <VecDeque<Segment> as IntoIterator>::IntoIter;
-
-	fn into_iter(self) -> Self::IntoIter {
-		self.ring.into_iter()
-	}
-}
-
-impl Extend<Segment> for SegmentRing {
-	fn extend<T: IntoIterator<Item = Segment>>(&mut self, iter: T) {
-		self.extend_empty(iter);
-	}
-
-	fn extend_one(&mut self, item: Segment) {
-		self.push_empty(item);
+		*limit += (ring.len() - len) * SIZE;
 	}
 
 	fn extend_reserve(&mut self, additional: usize) {
-		self.ring.reserve(additional);
+		self.ring.reserve(additional)
+	}
+}
+
+#[cfg(test)]
+mod ring_test {
+	use std::error::Error;
+	use crate::pool::VoidPool;
+	use crate::segment::{SegRing, SIZE};
+
+	#[test]
+	fn write_read() -> Result<(), Box<dyn Error>> {
+		let ref mut pool = VoidPool::default();
+		let mut ring = SegRing::default();
+
+		ring.reserve(7 * SIZE, pool);
+		assert_eq!(ring.len, 0);
+		assert_eq!(ring.limit, 7 * SIZE);
+		assert_eq!(ring.count, 0);
+		assert_eq!(ring.frag, 0);
+
+		ring.write(|data| {
+			for seg in &mut data[..3] {
+				seg.grow(SIZE / 2);
+			}
+		});
+
+		assert_eq!(ring.len, 3, "length after write");
+		assert_eq!(ring.limit, 4 * SIZE + SIZE / 2, "limit after write");
+		assert_eq!(ring.count, 3 * SIZE / 2, "count after write");
+		assert_eq!(ring.frag, SIZE, "fragmentation after write");
+
+		ring.read(|data| {
+			for seg in &mut data[..3] {
+				seg.consume(SIZE / 2);
+			}
+		});
+
+		assert_eq!(ring.len, 0, "length after read");
+		assert_eq!(ring.limit, 7 * SIZE, "limit after read");
+		assert_eq!(ring.count, 0, "count after read");
+		assert_eq!(ring.frag, 0, "fragmentation after read");
+
+		Ok(())
 	}
 }
 
@@ -253,12 +398,18 @@ impl Segment {
 	/// called to complete a read operation.
 	///
 	/// [`consume`]: Self::consume
-	pub fn data(&self) -> &[u8] { self.mem.data() }
+	pub fn data<R: RangeBounds<usize>>(&self, range: R) -> &[u8] {
+		let range = slice::range(range, ..self.len());
+		&self.mem.data()[range]
+	}
 	/// Returns a slice of unwritten bytes in the segment. [`grow`][] must be
 	/// called to complete a write operation. Forks shared memory.
 	///
 	/// [`grow`]: Self::grow
-	pub fn data_mut(&mut self) -> &mut [u8] { self.mem.data_mut() }
+	pub fn data_mut<R: RangeBounds<usize>>(&mut self, range: R) -> &mut [u8] {
+		let range = slice::range(range, ..self.limit());
+		&mut self.mem.data_mut()[range]
+	}
 	/// Returns `true` if the segment is shared.
 	pub fn is_shared(&self) -> bool { self.mem.is_shared() }
 
@@ -338,9 +489,8 @@ impl Segment {
 	pub fn copy_into(&self, target: &mut Self, offset: usize, mut byte_count: usize) -> usize {
 		if offset >= self.len() { return 0 }
 
-		let data = self.data();
-		byte_count = min(byte_count, data.len());
-		byte_count = target.push_slice(&data[offset..byte_count]);
+		byte_count = min(byte_count, self.len());
+		byte_count = target.push_slice(self.data(offset..byte_count));
 		byte_count
 	}
 
@@ -348,7 +498,7 @@ impl Segment {
 	/// number of bytes copied. Shared memory will only be forked in `target`.
 	pub fn copy_all_into(&self, target: &mut Self, offset: usize) -> usize {
 		if offset >= self.len() { return 0 }
-		target.push_slice(&self.data()[offset..])
+		target.push_slice(self.data(offset..))
 	}
 	
 	/// Inserts `other` at the front of the current segment.
@@ -364,7 +514,7 @@ impl Segment {
 }
 
 #[cfg(test)]
-mod test {
+mod mem_test {
 	use quickcheck::{Arbitrary, Gen};
 	use quickcheck_macros::quickcheck;
 	use super::memory::Memory;

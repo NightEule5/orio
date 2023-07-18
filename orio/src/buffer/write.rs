@@ -13,13 +13,10 @@
 // limitations under the License.
 
 use std::cmp::min;
-use std::hash::Hasher;
 use std::io::Read;
-use crate::Buffer;
-use crate::error::MapOp;
-use crate::streams::{BufSink, BufSource, Error, Result, Sink, Source};
+use crate::{Buffer, Context::BufWrite, Error, Result, ResultExt};
+use crate::streams::{BufSink, BufSource, Sink, Source};
 use crate::pool::SharedPool;
-use crate::streams::OperationKind::BufWrite;
 
 impl<P: SharedPool> Buffer<P> {
 	fn write_segments(
@@ -29,7 +26,7 @@ impl<P: SharedPool> Buffer<P> {
 	) -> Result<usize> {
 		let Self { pool, segments, .. } = self;
 
-		segments.reserve(count, &mut *Self::lock_pool(pool).map_op(BufWrite)?);
+		segments.reserve(count, &mut *Self::lock_pool(pool).context(BufWrite)?);
 
 
 		let mut written = 0;
@@ -40,7 +37,7 @@ impl<P: SharedPool> Buffer<P> {
 
 				if slice.is_empty() { continue }
 
-				let n = write(slice).map_op(BufWrite)?;
+				let n = write(slice).context(BufWrite)?;
 				written += n;
 				count -= n;
 				seg.grow(n);
@@ -51,7 +48,7 @@ impl<P: SharedPool> Buffer<P> {
 			Ok::<_, Error>(())
 		})?;
 
-		self.tidy().map_op(BufWrite)?;
+		self.tidy().context(BufWrite)?;
 		Ok(written)
 	}
 
@@ -62,11 +59,11 @@ impl<P: SharedPool> Buffer<P> {
 
 impl<P: SharedPool> Sink for Buffer<P> {
 	fn write(&mut self, source: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize> {
-		source.read(self, count).map_op(BufWrite)
+		source.read(self, count).context(BufWrite)
 	}
 
 	fn write_all(&mut self, source: &mut Buffer<impl SharedPool>) -> Result<usize> {
-		BufSource::read_all(source, self).map_op(BufWrite)
+		BufSource::read_all(source, self).context(BufWrite)
 	}
 
 	fn close_sink(&mut self) -> Result { self.close() }
@@ -89,7 +86,7 @@ macro_rules! gen_int_writes {
 impl<P: SharedPool> BufSink for Buffer<P> {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
 		source.read_all(self)
-			  .map_op(BufWrite)
+			  .context(BufWrite)
 	}
 
 	fn write_i8(&mut self, value: i8) -> Result {

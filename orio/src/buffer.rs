@@ -21,16 +21,14 @@ pub use write::*;
 use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
-use std::io::{Read, Write};
 use std::ops::{DerefMut, RangeBounds};
 use simdutf8::compat::from_utf8;
 use crate::pool::{SharedPool, DefaultPool, Pool};
 use crate::segment::{Segment, SegRing};
-use crate::{ByteStr, ByteString, expect, SEGMENT_SIZE};
-use crate::error::MapOp;
-use crate::streams::{BufSink, BufSource, BufStream, Error, Result, Seekable, SeekOffset, Sink, Source};
+use crate::{ByteStr, Context, expect, Result, ResultExt, SEGMENT_SIZE};
+use crate::streams::{BufSink, BufStream, Seekable, SeekOffset};
 use crate::streams::codec::Encode;
-use crate::streams::OperationKind::{BufClear, BufCompact, BufCopy, BufRead, Seek};
+use Context::{BufClear, BufCompact, BufCopy, BufRead, StreamSeek};
 
 #[derive(Copy, Clone, Debug)]
 pub struct BufferOptions {
@@ -223,14 +221,16 @@ impl<P: SharedPool> Buffer<P> {
 	pub fn is_not_empty(&self) -> bool { self.segments.is_not_empty() }
 
 	fn lock_pool(pool: &P) -> Result<impl DerefMut<Target = impl Pool> + '_> {
-		pool.lock()
-			.map_err(Error::pool)
+		Ok(pool.lock()?)
 	}
 
 	pub fn clear(&mut self) -> Result {
 		let Self { pool, segments, .. } = self;
-		let mut pool = Self::lock_pool(pool).map_op(BufClear)?;
-		segments.clear(&mut *pool);
+		segments.clear(
+			pool.lock()
+				.context(BufClear)?
+				.deref_mut()
+		);
 		Ok(())
 	}
 
@@ -252,8 +252,7 @@ impl<P: SharedPool> Buffer<P> {
 					dst.push_back(seg.share(size));
 					byte_count -= size;
 				} else {
-					let mut pool = Buffer::lock_pool(pool)?;
-					dst.reserve(size, &mut *pool);
+					dst.reserve(size, pool.lock()?.deref_mut());
 
 					let mut off = 0;
 					while let Some(mut target) = if off < size {
@@ -269,7 +268,7 @@ impl<P: SharedPool> Buffer<P> {
 
 			sink.tidy()?;
 		};
-		result.map_op(BufCopy)
+		result.context(BufCopy)
 	}
 
 	/// Copies all byte into `sink`. Memory is either actually copied or shared for
@@ -298,17 +297,17 @@ impl<P: SharedPool> Buffer<P> {
 			..
 		} = *self;
 		let Self { pool, segments, .. } = self;
-		let pool = &mut *Self::lock_pool(pool)?;
+		let mut pool = pool.lock()?;
 
 		let count = segments.len() * retention_ratio;
 		let limit = segments.limit();
 
 		if count < limit {
 			let surplus = (limit - count) / SEGMENT_SIZE;
-			segments.trim(surplus, pool);
+			segments.trim(surplus, pool.deref_mut());
 		} else {
 			let deficit = count - limit;
-			pool.claim_size(segments, deficit);
+			pool.deref_mut().claim_size(segments, deficit);
 		}
 
 		Ok(())
@@ -358,15 +357,15 @@ impl<P: SharedPool> Buffer<P> {
 		let BufferOptions { is_fork_reluctant, .. } = *options;
 
 		let result: Result = try {
-			let pool = &mut *Self::lock_pool(pool)?;
+			let mut pool = pool.lock()?;
 
-			segments.trim(usize::MAX, pool);
+			segments.trim(usize::MAX, pool.deref_mut());
 
 			*segments = (|| {
 				let mut target = SegRing::default();
 				let Some(mut prev) = segments.pop_front() else { return target };
 				while let Some(mut curr) = segments.pop_front() {
-					merge(&mut prev, &mut curr, &mut *pool, is_fork_reluctant);
+					merge(&mut prev, &mut curr, pool.deref_mut(), is_fork_reluctant);
 
 					if prev.is_full() {
 						target.push_back(prev);
@@ -396,7 +395,7 @@ impl<P: SharedPool> Buffer<P> {
 				target
 			})();
 		};
-		result.map_op(BufCompact)
+		result.context(BufCompact)
 	}
 
 	/// Skips up to `byte_count` bytes.
@@ -415,7 +414,7 @@ impl<P: SharedPool> Buffer<P> {
 			count
 		});
 
-		self.tidy().map_op(BufRead)?;
+		self.tidy().context(BufRead)?;
 
 		Ok(count)
 	}
@@ -558,7 +557,7 @@ impl<P: SharedPool> Seekable for Buffer<P> {
 	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
 		self.skip(
 			offset.to_pos(0, self.count())
-		).map_op(Seek)
+		).context(StreamSeek)
 	}
 
 	/// Returns the [`count`][].

@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::Buffer;
+use crate::{Buffer, Result};
 use crate::pool::SharedPool;
-use super::{Result, Sink, Source};
+use super::{Sink, Source};
 
 /// Returns a [`Sink`] that writes to nowhere, dropping any data written to it.
 pub fn void_sink() -> VoidSink { VoidSink }

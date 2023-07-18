@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use ErrorKind::Eos;
-use crate::{Buffer, BufferOptions};
+use crate::{Buffer, BufferOptions, Error, Result, SourceError::Eos};
+use crate::Context::{BufFlush, BufRead, BufWrite, StreamSeek};
+use crate::error::ResultExt;
 use crate::pool::{DefaultPool, SharedPool};
-use crate::streams::{Sink, Source, Result, BufStream, BufSource, Error, BufSink, ErrorKind, Seekable, SeekOffset, SeekableExt};
-use crate::streams::OperationKind::{BufFlush, BufRead};
+use crate::streams::{Sink, Source, BufStream, BufSource, BufSink, Seekable, SeekOffset, SeekableExt};
 use crate::segment::SIZE;
 
 pub fn buffer_source<S: Source>(source: S, options: BufferOptions) -> BufferedSource<S> {
@@ -55,11 +55,11 @@ impl<S: Source> BufferedSource<S> {
 
 		let cnt = self.source
 					  .read(&mut self.buffer, byte_count)
-					  .map_err(Error::with_op_buf_read);
+					  .context(BufRead);
 		match cnt {
-			Ok(cnt)                      => Ok(cnt > 0),
-			Err(Error { kind: Eos, .. }) => Ok(false),
-			Err(error)                   => Err(error)
+			Ok(cnt)                        => Ok(cnt > 0),
+			Err(Error { source: Eos, .. }) => Ok(false),
+			Err(error)                     => Err(error)
 		}
 	}
 }
@@ -103,7 +103,7 @@ impl<S: Source> BufSource for BufferedSource<S> {
 
 	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize> {
 		sink.write_all(self.buf_mut())
-			.map_err(Error::with_op_buf_read)
+			.context(BufRead)
 	}
 }
 
@@ -120,10 +120,10 @@ impl<S: Source + Seekable> BufferedSource<S> {
 		let mut seek_buf = Buffer::lean();
 		self.source
 			.read(&mut seek_buf, count)
-			.map_err(Error::with_op_seek)?;
+			.context(StreamSeek)?;
 		self.buffer
 			.prefix_with(&mut seek_buf)
-			.map_err(Error::with_op_seek)?;
+			.context(StreamSeek)?;
 		Ok(new_pos)
 	}
 
@@ -195,10 +195,10 @@ impl<S: Sink> Sink for BufferedSink<S> {
 			// Both of these need a chance to run before returning an error.
 			let read = self.sink
 						   .write_all(&mut self.buffer)
-						   .map_err(Error::with_op_buf_flush);
+						   .context(BufFlush);
 			let flush = self.sink
 							.flush()
-							.map_err(Error::with_op_buf_flush);
+							.context(BufFlush);
 			read?;
 			flush?;
 			Ok(())
@@ -230,14 +230,14 @@ impl<S: Sink> BufStream for BufferedSink<S> {
 impl<S: Sink> BufSink for BufferedSink<S> {
 	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
 		source.read_all(self.buf_mut())
-			  .map_err(Error::with_op_buf_write)
+			  .context(BufWrite)
 	}
 }
 
 impl<S: Sink + Seekable> Seekable for BufferedSink<S> {
 	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
 		// Todo: Is there some less naive approach than flushing then seeking?
-		self.flush().map_err(Error::with_op_seek)?;
+		self.flush().context(StreamSeek)?;
 		self.sink.seek(offset)
 	}
 

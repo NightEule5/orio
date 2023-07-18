@@ -16,9 +16,9 @@
 
 use std::cmp::min;
 use std::mem;
-use crate::Buffer;
+use crate::{Buffer, Result};
 use crate::pool::SharedPool;
-use crate::streams::{BufSink, BufSource, Result};
+use crate::streams::{BufSink, BufSource};
 
 /// Defines encoding behavior for fixed-size types.
 pub trait EncodeFixed: Sized {

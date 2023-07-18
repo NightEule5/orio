@@ -24,7 +24,6 @@ shabal = ["dep:shabal", "hash"]
 whirlpool = ["dep:whirlpool", "hash"]
 
 [dependencies]
-amplify_derive = "2.11.3"
 base16ct = { version = "0.2.0", features = ["std"] }
 base64 = "0.21.0"
 cfg-if = "1.0.0"
@@ -40,6 +39,8 @@ sha3 = { version = "0.10.8", optional = true }
 shabal = { version = "0.4.1", optional = true }
 whirlpool = { version = "0.10.4", optional = true }
 digest = { version = "0.10.6", optional = true, features = ["std"] }
+thiserror = "1.0.43"
+strum = { version = "0.25", features = ["derive"] }
 
 [dev-dependencies]
 base16ct = { version = "0.2.0", features = ["std"] }

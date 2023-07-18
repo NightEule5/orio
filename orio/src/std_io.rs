@@ -14,10 +14,11 @@
 
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use crate::Buffer;
+use crate::{Buffer, Error, Result};
+use crate::Context::{BufFlush, BufRead, BufWrite, StreamSeek};
+use crate::error::ResultExt;
 use crate::pool::SharedPool;
-use crate::streams::{BufSink, BufSource, Error, Result, Seekable, SeekOffset, Sink, Source};
-use crate::streams::OperationKind::{BufFlush, Seek as SeekOp};
+use crate::streams::{BufSink, BufSource, Seekable, SeekOffset, Sink, Source};
 
 trait AsInner {
 	type Inner;
@@ -58,7 +59,7 @@ impl<R: Read> Source for ReaderSource<R> {
 	fn read(&mut self, sink: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize> {
 		let Self(reader) = self;
 		sink.write_std(reader, count)
-			.map_err(Error::with_op_buf_read)
+			.context(BufRead)
 	}
 }
 
@@ -66,13 +67,13 @@ impl<W: Write> Sink for WriterSink<W> {
 	fn write(&mut self, source: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize> {
 		let Self(writer) = self;
 		source.read_std(writer, count)
-			  .map_err(Error::with_op_buf_write)
+			  .context(BufWrite)
 	}
 
 	fn flush(&mut self) -> Result {
 		let Self(writer) = self;
 		writer.flush()
-			  .map_err(|err| Error::io(BufFlush, err))
+			  .map_err(|err| Error::new(BufFlush, err.into()))
 	}
 }
 
@@ -81,7 +82,7 @@ impl<T: AsInner<Inner: Seek>> Seekable for T {
 		Ok(
 			self.as_inner()
 				.seek(offset.into_seek_from())
-				.map_err(|err| Error::io(SeekOp, err))? as usize
+				.map_err(|err| Error::new(StreamSeek, err.into()))? as usize
 		)
 	}
 }
@@ -118,10 +119,8 @@ impl<S: Source> Read for SourceReader<S> {
 	default fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		let Self(source) = self;
 		let ref mut buffer = Buffer::default();
-		let count = source.read(buffer, buf.len())
-						  .map_err(Error::into_io)?;
-		buffer.read_into_slice_exact(buf)
-			  .map_err(Error::into_io)?;
+		let count = source.read(buffer, buf.len())?;
+		buffer.read_into_slice_exact(buf)?;
 		Ok(count)
 	}
 }
@@ -129,8 +128,7 @@ impl<S: Source> Read for SourceReader<S> {
 impl<S: BufSource> Read for SourceReader<S> {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		let Self(source) = self;
-		source.read_into_slice(buf)
-			  .map_err(Error::into_io)
+		Ok(source.read_into_slice(buf)?)
 	}
 }
 
@@ -154,30 +152,24 @@ impl<S: Sink> From<S> for SinkWriter<S> {
 impl<S: Sink> Write for SinkWriter<S> {
 	default fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		let Self(sink) = self;
-		let ref mut buffer = Buffer::from_slice(buf).map_err(Error::into_io)?;
-		sink.write_all(buffer)
-			.map_err(Error::into_io)
+		let ref mut buffer = Buffer::from_slice(buf)?;
+		Ok(sink.write_all(buffer)?)
 	}
 
 	default fn flush(&mut self) -> io::Result<()> {
-		self.0
-			.flush()
-			.map_err(Error::into_io)
+		Ok(self.0.flush()?)
 	}
 }
 
 impl<S: BufSink> Write for SinkWriter<S> {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		let Self(sink) = self;
-		sink.write_from_slice(buf)
-			.map_err(Error::into_io)?;
+		sink.write_from_slice(buf)?;
 		Ok(buf.len())
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		self.0
-			.flush()
-			.map_err(Error::into_io)
+		Ok(self.0.flush()?)
 	}
 }
 
@@ -197,7 +189,19 @@ impl<S: Sink + Seekable> Seek for SinkWriter<S> {
 fn bridge_seek_impl(stream: &mut impl AsInner<Inner: Seekable>, pos: SeekFrom) -> io::Result<u64> {
 	Ok(
 		stream.as_inner()
-			  .seek(pos.into())
-			  .map_err(Error::into_io)? as u64
+			  .seek(pos.into())? as u64
 	)
+}
+
+impl From<Error> for io::Error {
+	fn from(error: Error) -> Self {
+		use crate::error::SourceError::{Eos, Io};
+		use io::ErrorKind::UnexpectedEof;
+
+		match error.source {
+			Eos => Self::new(UnexpectedEof, error),
+			Io(err) => err,
+			other => Self::other(other)
+		}
+	}
 }

@@ -13,18 +13,14 @@
 // limitations under the License.
 
 use std::error::Error as StdError;
-use std::{fmt, io, mem, result};
+use std::{fmt, mem};
 use std::cmp::min;
 use std::fmt::{Display, Formatter};
-use amplify_derive::Display;
 use simdutf8::compat::Utf8Error;
-use OperationKind::{BufRead, BufWrite};
-use crate::{Buffer, BufferOptions, ByteStr, ByteString, error, SEGMENT_SIZE};
+use crate::{Buffer, BufferOptions, ByteStr, ByteString, Context::BufRead, Error, Result, ResultExt, SEGMENT_SIZE};
 use crate::buffered_wrappers::{buffer_sink, buffer_source, BufferedSink, BufferedSource};
-use crate::pool::{Error as PoolError, SharedPool};
+use crate::pool::SharedPool;
 use crate::streams::codec::{Decode, Encode};
-use crate::streams::ErrorKind::{Closed, Eos, InvalidUTF8, Io, Other};
-use crate::streams::OperationKind::{BufClear, BufCompact, BufCopy, BufFlush, Seek};
 
 pub mod codec;
 mod seeking;
@@ -32,134 +28,6 @@ mod void;
 
 pub use seeking::*;
 pub use void::*;
-
-pub type Error = error::Error<OperationKind, ErrorKind>;
-pub type Result<T = ()> = result::Result<T, Error>;
-
-#[derive(Copy, Clone, Debug, Default, Display)]
-pub enum OperationKind {
-	#[default]
-	#[display("unknown operation")]
-	Unknown,
-	#[display("read from buffer")]
-	BufRead,
-	#[display("write to buffer")]
-	BufWrite,
-	#[display("copy buffer")]
-	BufCopy,
-	#[display("clear buffer")]
-	BufClear,
-	#[display("flush buffer")]
-	BufFlush,
-	#[display("compact buffer")]
-	BufCompact,
-	#[display("seek")]
-	Seek,
-	#[display("{0}")]
-	Other(&'static str)
-}
-
-impl error::OperationKind for OperationKind {
-	fn unknown() -> Self { Self::Unknown }
-}
-
-#[derive(Copy, Clone, Debug, Display)]
-pub enum ErrorKind {
-	#[display("premature end-of-stream")]
-	Eos,
-	#[display("IO error")]
-	Io,
-	#[display("invalid UTF-8")]
-	InvalidUTF8,
-	#[display("stream closed")]
-	Closed,
-	#[display("segment pool error")]
-	Pool,
-	#[display("{0}")]
-	Other(&'static str),
-}
-
-impl error::ErrorKind for ErrorKind {
-	fn other(message: &'static str) -> Self { Other(message) }
-}
-
-impl From<io::Error> for Error {
-	fn from(value: io::Error) -> Self {
-		if let io::ErrorKind::UnexpectedEof = value.kind() {
-			Self::eos(OperationKind::Unknown)
-		} else {
-			Self::io(OperationKind::Unknown, value)
-		}
-	}
-}
-
-impl From<PoolError> for Error {
-	fn from(value: PoolError) -> Self { Self::pool(value) }
-}
-
-impl Error {
-	/// Creates a new "end-of-stream" error.
-	pub fn eos(op: OperationKind) -> Self { Self::new(op, Eos, None) }
-
-	/// Creates a new IO error.
-	pub fn io(op: OperationKind, error: io::Error) -> Self {
-		Self::new(op, Io, Some(error.into()))
-	}
-
-	/// Creates a new "closed" error.
-	pub fn closed(op: OperationKind) -> Self {
-		Self::new(op, Closed, None)
-	}
-
-	/// Creates a new segment pool error.
-	pub fn pool(error: PoolError) -> Self {
-		Self::new(OperationKind::Unknown, ErrorKind::Pool, Some(error.into()))
-	}
-
-	/// Create a new UTF-8 error.
-	pub fn invalid_utf8(op: OperationKind, error: OffsetUtf8Error) -> Self {
-		Self::new(op, InvalidUTF8, Some(error.into()))
-	}
-
-	/// Returns the source downcast into an IO Error, if possible.
-	pub fn io_source(&self) -> Option<&io::Error> {
-		self.source()?.downcast_ref()
-	}
-
-	/// Convenience shorthand for `with_operation(OperationKind::BufRead)`.
-	pub fn with_op_buf_read(self) -> Self { self.with_operation(BufRead) }
-
-	/// Convenience shorthand for `with_operation(OperationKind::BufWrite)`.
-	pub fn with_op_buf_write(self) -> Self { self.with_operation(BufWrite) }
-
-	/// Convenience shorthand for `with_operation(OperationKind::BufCopy)`.
-	pub fn with_op_buf_copy(self) -> Self { self.with_operation(BufCopy) }
-
-	/// Convenience shorthand for `with_operation(OperationKind::BufClear)`.
-	pub fn with_op_buf_clear(self) -> Self { self.with_operation(BufClear) }
-
-	/// Convenience shorthand for `with_operation(OperationKind::BufFlush)`.
-	pub fn with_op_buf_flush(self) -> Self { self.with_operation(BufFlush) }
-
-	/// Convenience shorthand for `with_operation(OperationKind::BufCompact)`.
-	pub fn with_op_buf_compact(self) -> Self { self.with_operation(BufCompact) }
-
-	/// Convenience shorthand for `with_operation(OperationKind::Seek)`.
-	pub fn with_op_seek(self) -> Self { self.with_operation(Seek) }
-
-	pub(crate) fn into_io(self) -> io::Error {
-		match self.kind {
-			Eos => io::Error::new(io::ErrorKind::UnexpectedEof, self),
-			Io  => {
-				let Some(src) = self.io_source() else {
-					return io::Error::other(self)
-				};
-				io::Error::new(src.kind(), self)
-			}
-			_   => io::Error::other(self)
-		}
-	}
-}
 
 /// A data source.
 pub trait Source {
@@ -446,7 +314,7 @@ impl Source for &[u8] {
 	}
 
 	fn read_all(&mut self, sink: &mut Buffer<impl SharedPool>) -> Result<usize> {
-		sink.write_from_slice(self).map_err(Error::with_op_buf_read)?;
+		sink.write_from_slice(self).context(BufRead)?;
 		let len = self.len();
 		*self = &self[len..];
 		Ok(len)
@@ -493,6 +361,10 @@ impl OffsetUtf8Error {
 	pub fn error_len(&self) -> Option<usize> {
 		self.inner.error_len()
 	}
+}
+
+impl From<Utf8Error> for OffsetUtf8Error {
+	fn from(value: Utf8Error) -> Self { Self::new(value, 0) }
 }
 
 impl Display for OffsetUtf8Error {

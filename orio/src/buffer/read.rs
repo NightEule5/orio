@@ -15,11 +15,9 @@
 use std::cmp::min;
 use std::io::Write;
 use simdutf8::compat::from_utf8;
-use crate::{Buffer, ByteString};
-use crate::error::MapOp;
-use crate::streams::{BufSource, Error, OffsetUtf8Error, Result, Sink, Source};
+use crate::{Buffer, ByteString, Context::BufRead, Error, Result, ResultExt};
+use crate::streams::{BufSource, OffsetUtf8Error, Sink, Source};
 use crate::pool::SharedPool;
-use crate::streams::OperationKind::BufRead;
 
 impl<P: SharedPool> Buffer<P> {
 	fn read_segments(
@@ -40,7 +38,7 @@ impl<P: SharedPool> Buffer<P> {
 			Ok::<_, Error>(())
 		})?;
 
-		self.tidy().map_op(BufRead)?;
+		self.tidy().context(BufRead)?;
 		Ok(count)
 	}
 
@@ -82,7 +80,7 @@ impl<P: SharedPool> Source for Buffer<P> {
 			self_tidy?;
 			sink_tidy?;
 		};
-		result.map_op(BufRead)?;
+		result.context(BufRead)?;
 
 		Ok(read)
 	}
@@ -124,7 +122,7 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 
 	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize> {
 		sink.write_all(self)
-			.map_op(BufRead)
+			.context(BufRead)
 	}
 
 	fn read_i8(&mut self) -> Result<i8> {
@@ -144,7 +142,7 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 			)
 		});
 
-		self.tidy().map_op(BufRead)?;
+		self.tidy().context(BufRead)?;
 		Ok(byte)
 	}
 
@@ -172,7 +170,7 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 		Ok(n)
 	}
 
-	fn read_into_slice_exact(&mut self, mut dst: &mut [u8]) -> Result {
+	fn read_into_slice_exact(&mut self, dst: &mut [u8]) -> Result {
 		let count = dst.len();
 		self.require(count)?;
 
@@ -195,7 +193,7 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 		let mut off = 0;
 		self.read_segments(byte_count, |seg| {
 			let utf8 = from_utf8(seg).map_err(|err|
-				Error::invalid_utf8(BufRead, OffsetUtf8Error::new(err, off))
+				Error::new(BufRead, OffsetUtf8Error::new(err, off).into())
 			)?;
 
 			off += seg.len();
@@ -232,7 +230,7 @@ impl<P: SharedPool> BufSource for Buffer<P> {
 		let mut off = 0;
 		self.read_segments(str.len(), |seg| {
 			let utf8 = from_utf8(seg).map_err(|err|
-				Error::invalid_utf8(BufRead, OffsetUtf8Error::new(err, off))
+				Error::new(BufRead, OffsetUtf8Error::new(err, off).into())
 			)?;
 
 			off += seg.len();

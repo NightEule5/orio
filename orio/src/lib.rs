@@ -57,6 +57,7 @@
 	extend_one,
 	generic_const_exprs,
 	int_roundings,
+	io_error_other,
 	return_position_impl_trait_in_trait,
 	seek_stream_len,
 	slice_range,
@@ -65,7 +66,6 @@
 	try_blocks,
 	type_alias_impl_trait,
 )]
-#![feature(io_error_other)]
 
 mod buffer;
 mod buffered_wrappers;
@@ -83,3 +83,7 @@ pub use buffer::*;
 pub use segment::{Segment, SIZE as SEGMENT_SIZE};
 pub use byte_str::*;
 pub use std_io::*;
+
+pub type Result<T = (), E = Error> = std::result::Result<T, E>;
+
+type ErrorBox = Box<dyn std::error::Error + Send + Sync + 'static>;

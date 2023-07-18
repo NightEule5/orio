@@ -12,103 +12,164 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
-use std::error::Error as StdError;
-use std::fmt::{Debug, Display, Formatter};
+use std::{fmt, io};
+use crate::streams::OffsetUtf8Error;
+use crate::pool::Error as PoolError;
+use crate::ErrorBox;
 
-pub type ErrorBox = Box<dyn StdError + Send + Sync>;
-
-pub trait OperationKind: Copy + Debug + Display {
-	fn unknown() -> Self;
+/// The error type Orio `Buffer`s, `Source`s and `Sink`s, etc.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct Error {
+	pub context: Context,
+	pub source: SourceError,
 }
 
-pub trait ErrorKind: Copy + Debug + Display {
-	fn other(message: &'static str) -> Self;
+/// The source error encountered.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+#[non_exhaustive]
+pub enum SourceError {
+	/// The underlying stream is closed.
+	#[error("stream closed")]
+	Closed,
+	/// End-of-stream was reached prematurely.
+	#[error("premature end-of-stream")]
+	Eos,
+	/// An IO error.
+	Io(io::Error),
+	/// A segment pool error.
+	Pool(#[from] PoolError),
+	/// Invalid UTF-8 was encountered.
+	Utf8(#[from] OffsetUtf8Error),
+	/// An unknown error.
+	Unknown(#[from] ErrorBox),
 }
 
-pub(crate) trait MapOp<T, O: OperationKind> {
-	fn map_op(self, op: O) -> Self;
+/// The operation attempted when the error was encountered.
+#[derive(Copy, Clone, Debug, Default, strum::EnumIs)]
+#[non_exhaustive]
+pub enum Context {
+	/// Unknown operation.
+	#[default]
+	Unknown,
+	/// Reading from the buffer.
+	BufRead,
+	/// Writing to the buffer.
+	BufWrite,
+	/// Copying the buffer.
+	BufCopy,
+	/// Clearing the buffer.
+	BufClear,
+	/// Flushing the buffer.
+	BufFlush,
+	/// Compacting the buffer.
+	BufCompact,
+	/// Seeking the underlying stream.
+	StreamSeek,
+	/// Other operation described with a string.
+	Other(&'static str),
 }
 
-impl<T, O: OperationKind, E: ErrorKind> MapOp<T, O> for Result<T, Error<O, E>> {
-	fn map_op(mut self, op: O) -> Self {
+pub(crate) trait ResultExt<T> {
+	fn context(self, context: Context) -> crate::Result<T>;
+}
+
+impl Error {
+	pub fn new(context: Context, source: SourceError) -> Self {
+		Self { context, source }
+	}
+
+	pub fn closed(context: Context) -> Self {
+		Self::new(context, SourceError::Closed)
+	}
+
+	pub fn eos(context: Context) -> Self {
+		Self::new(context, SourceError::Eos)
+	}
+}
+
+impl From<SourceError> for Error {
+	fn from(value: SourceError) -> Self {
+		Self::new(Context::Unknown, value)
+	}
+}
+
+impl From<io::Error> for Error {
+	fn from(value: io::Error) -> Self {
+		<Self as From<SourceError>>::from(value.into())
+	}
+}
+
+impl From<PoolError> for Error {
+	fn from(value: PoolError) -> Self {
+		<Self as From<SourceError>>::from(value.into())
+	}
+}
+
+impl From<OffsetUtf8Error> for Error {
+	fn from(value: OffsetUtf8Error) -> Self {
+		<Self as From<SourceError>>::from(value.into())
+	}
+}
+
+impl From<ErrorBox> for Error {
+	fn from(value: ErrorBox) -> Self {
+		<Self as From<SourceError>>::from(value.into())
+	}
+}
+
+impl From<io::Error> for SourceError {
+	fn from(value: io::Error) -> Self {
+		if let io::ErrorKind::UnexpectedEof = value.kind() {
+			Self::Eos
+		} else {
+			Self::Io(value)
+		}
+	}
+}
+
+use simdutf8::compat::Utf8Error;
+
+impl From<Utf8Error> for SourceError {
+	fn from(value: Utf8Error) -> Self {
+		<Self as From<OffsetUtf8Error>>::from(value.into())
+	}
+}
+
+impl Context {
+	pub fn as_str(&self) -> &'static str {
 		match self {
-			Err(ref mut err) => {
-				err.op = op;
-				self
-			}
-			ok => ok
+			Context::Unknown    => "unknown operation",
+			Context::BufRead    => "read from buffer",
+			Context::BufWrite   => "write to buffer",
+			Context::BufCopy    => "copy buffer",
+			Context::BufClear   => "clear buffer",
+			Context::BufFlush   => "flush buffer",
+			Context::BufCompact => "compact buffer",
+			Context::StreamSeek => "seek stream",
+			Context::Other(ctx) => ctx,
 		}
 	}
 }
 
-#[derive(Debug)]
-pub struct Error<O: OperationKind, E: ErrorKind> {
-	op: O,
-	pub(crate) kind: E,
-	source: Option<ErrorBox>,
+impl fmt::Display for Context {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.write_str(self.as_str())
+	}
 }
 
-impl<O: OperationKind, E: ErrorKind> Display for Error<O, E> {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		let Self { op, kind, source } = self;
-		if let Some(source) = source {
-			write!(f, "{op} failed; {kind} ({source})")
-		} else {
-			write!(f, "{op} failed; {kind}")
+impl<T, E: Into<SourceError>> ResultExt<T> for Result<T, E> {
+	fn context(self, context: Context) -> crate::Result<T> {
+		self.map_err(|err| Error::new(context, err.into()))
+	}
+}
+
+impl<T> ResultExt<T> for crate::Result<T> {
+	fn context(mut self, context: Context) -> Self {
+		if let Err(ref mut error) = self {
+			error.context = context;
 		}
-	}
-}
-
-impl<O: OperationKind, E: ErrorKind> StdError for Error<O, E> {
-	fn source(&self) -> Option<&(dyn StdError + 'static)> {
-		if let Some(ref source) = self.source {
-			Some(source.as_ref())
-		} else {
-			None
-		}
-	}
-}
-
-impl<O: OperationKind, K: ErrorKind> Error<O, K> {
-	pub(crate) fn new(
-		op: O,
-		kind: K,
-		source: Option<ErrorBox>
-	) -> Self {
-		Self { op, kind, source: source.map(Into::into) }
-	}
-
-	/// Creates a new error with a custom message.
-	pub fn other(
-		op: O,
-		message: &'static str,
-		source: Option<ErrorBox>
-	) -> Self {
-		Self::new(op, K::other(message), source)
-	}
-
-	/// Returns the operation kind.
-	pub fn operation(&self) -> O { self.op }
-
-	/// Sets the operation kind.
-	pub fn with_operation(mut self, op: O) -> Self {
-		self.op = op;
 		self
-	}
-
-	/// Returns the error kind.
-	pub fn kind(&self) -> K { self.kind }
-
-	/// Sets the error kind.
-	pub fn with_kind(mut self, kind: K) -> Self {
-		self.kind = kind;
-		self
-	}
-}
-
-impl<O: OperationKind, K: ErrorKind> From<&'static str> for Error<O, K> {
-	fn from(value: &'static str) -> Self {
-		Self::other(O::unknown(), value, None)
 	}
 }

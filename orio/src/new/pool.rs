@@ -2,13 +2,13 @@
 
 use std::cell::{BorrowMutError, RefCell, RefMut};
 use std::cmp::min;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use crate::new::ring;
 use super::element::Element;
-use super::segment::{Drain as RingDrain, Block, Seg, SegRing, SIZE};
+use super::segment::{Block, Seg, SIZE};
 use crate::SEGMENT_SIZE;
 
 #[derive(Debug, thiserror::Error)]
@@ -17,9 +17,9 @@ pub enum Error {
 	Borrow(#[from] BorrowMutError),
 }
 
-pub trait Pool<const N: usize, T: Element>
-where for<'p> <Self::Ref<'p> as Deref>::Target: MutPool<N, T> {
-	type Ref<'p>: DerefMut where Self: 'p;
+pub trait Pool<const N: usize, T: Element>: Clone {
+	type Pool: MutPool<N, T> + ?Sized;
+	type Ref<'p>: DerefMut<Target = Self::Pool> where Self: 'p;
 
 	/// Borrows the pool mutably, locking it for the duration of the borrow.
 	fn try_borrow(&self) -> Result<Self::Ref<'_>, Error>;
@@ -30,12 +30,14 @@ where for<'p> <Self::Ref<'p> as Deref>::Target: MutPool<N, T> {
 	}
 
 	/// Claims `count` segments into `target`.
-	fn claim_count(&self, target: &mut SegRing<N, T>, count: usize) -> Result<(), Error> {
+	fn claim_count<'d>(&self, target: &mut impl Extend<Seg<'d, N, T>>, count: usize) -> Result<(), Error>
+	where for<'p> <Self::Ref<'p> as Deref>::Target: Sized {
 		Ok(self.try_borrow()?.claim_count(target, count))
 	}
 
 	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size(&self, target: &mut SegRing<N, T>, min_size: usize) -> Result<(), Error> {
+	fn claim_size<'d>(&self, target: &mut impl Extend<Seg<'d, N, T>>, min_size: usize) -> Result<(), Error>
+	where for<'p> <Self::Ref<'p> as Deref>::Target: Sized {
 		Ok(self.try_borrow()?.claim_size(target, min_size))
 	}
 
@@ -48,7 +50,8 @@ where for<'p> <Self::Ref<'p> as Deref>::Target: MutPool<N, T> {
 
 	/// Collects many segments back into the pool. Handling of shared segments is
 	/// left up to implementation; the default implementation discards them.
-	fn collect(&self, segments: RingDrain<N, T>) -> Result<(), Error> {
+	fn collect<'d>(&self, segments: impl IntoIterator<Item = Seg<'d, N, T>>) -> Result<(), Error>
+	where for<'p> <Self::Ref<'p> as Deref>::Target: Sized {
 		Ok(self.try_borrow()?.collect(segments))
 	}
 
@@ -59,6 +62,10 @@ where for<'p> <Self::Ref<'p> as Deref>::Target: MutPool<N, T> {
 	}
 }
 
+/// A mutably-borrowed pool, usually from a [`RefCell`].
+///
+/// Note on object-safety: this trait is object-safe for single-segment operations,
+/// but not for bulk operations.
 pub trait MutPool<const N: usize, T: Element> {
 	/// Claims a single segment.
 	///
@@ -74,10 +81,10 @@ pub trait MutPool<const N: usize, T: Element> {
 	fn claim_one<'d>(&mut self) -> Seg<'d, N, T>;
 
 	/// Claims `count` segments into `target`.
-	fn claim_count(&mut self, target: &mut SegRing<N, T>, count: usize);
+	fn claim_count<'d>(&mut self, target: &mut impl Extend<Seg<'d, N, T>>, count: usize) where Self: Sized;
 
 	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size(&mut self, target: &mut SegRing<N, T>, min_size: usize) {
+	fn claim_size<'d>(&mut self, target: &mut impl Extend<Seg<'d, N, T>>, min_size: usize) where Self: Sized {
 		let count = min_size.next_multiple_of(SEGMENT_SIZE) / SEGMENT_SIZE;
 
 		self.claim_count(target, count)
@@ -88,7 +95,7 @@ pub trait MutPool<const N: usize, T: Element> {
 
 	/// Collects many segments back into the pool. Handling of shared segments is
 	/// left up to implementation; the default implementation discards them.
-	fn collect(&mut self, segments: RingDrain<N, T>);
+	fn collect<'d>(&mut self, segments: impl IntoIterator<Item = Seg<'d, N, T>>) where Self: Sized;
 
 	/// Clears segments from the pool to free space. The actual segment count to be
 	/// cleared is left up to implementation.
@@ -98,25 +105,54 @@ pub trait MutPool<const N: usize, T: Element> {
 #[derive(Default)]
 pub struct DefaultPool(Vec<Block<SIZE, u8>>);
 
-#[derive(Clone)]
-pub struct PoolContainer<const N: usize, T: Element>(
-	Rc<RefCell<dyn MutPool<N, T>>>
-);
+pub struct PoolContainer<const N: usize, T, P>(Rc<RefCell<P>>, PhantomData<T>)
+where T: Element,
+	  P: MutPool<N, T> + ?Sized;
 
-impl<const N: usize, T: Element> PoolContainer<N, T> {
-	fn new(pool: impl MutPool<N, T> + 'static) -> Self {
-		Self(Rc::new(RefCell::new(pool)))
+impl<const N: usize, T, P> From<Rc<RefCell<P>>> for PoolContainer<N, T, P>
+	where T: Element,
+		  P: MutPool<N, T> + ?Sized {
+	fn from(pool: Rc<RefCell<P>>) -> Self {
+		Self(pool, PhantomData)
 	}
 }
 
-impl Default for PoolContainer<SIZE, u8> {
+impl<const N: usize, T, P> From<RefCell<P>> for PoolContainer<N, T, P>
+	where T: Element,
+		  P: MutPool<N, T> + Sized {
+	fn from(pool: RefCell<P>) -> Self {
+		Rc::new(pool).into()
+	}
+}
+
+impl<const N: usize, T, P> From<P> for PoolContainer<N, T, P>
+	where T: Element,
+		  P: MutPool<N, T> + Sized {
+	fn from(pool: P) -> Self {
+		RefCell::new(pool).into()
+	}
+}
+
+impl Default for PoolContainer<SIZE, u8, DefaultPool> {
 	fn default() -> Self {
-		Self::new(DefaultPool::default())
+		DefaultPool::default().into()
 	}
 }
 
-impl<const N: usize, T: Element> Pool<N, T> for PoolContainer<N, T> {
-	type Ref<'p> = RefMut<'p, dyn MutPool<N, T>>;
+impl<const N: usize, T, P> Clone for PoolContainer<N, T, P>
+	where T: Element,
+		  P: MutPool<N, T> + ?Sized {
+	fn clone(&self) -> Self {
+		self.0.clone().into()
+	}
+}
+
+impl<const N: usize, T, P> Pool<N, T> for PoolContainer<N, T, P>
+where T: Element,
+	  P: MutPool<N, T> + ?Sized,
+	  for<'p> P: 'p {
+	type Pool = P;
+	type Ref<'p> = RefMut<'p, P>;
 
 	fn try_borrow(&self) -> Result<Self::Ref<'_>, Error> {
 		Ok(self.0.try_borrow_mut()?)
@@ -124,20 +160,20 @@ impl<const N: usize, T: Element> Pool<N, T> for PoolContainer<N, T> {
 }
 
 /// Clones a shared reference to the default segment pool.
-pub fn pool() -> PoolContainer<SIZE, u8> { POOL.clone() }
+pub fn pool() -> PoolContainer<SIZE, u8, DefaultPool> { POOL.clone() }
 
 #[thread_local]
-static POOL: Lazy<PoolContainer<SIZE, u8>> = Lazy::new(PoolContainer::default);
+static POOL: Lazy<PoolContainer<SIZE, u8, DefaultPool>> = Lazy::new(PoolContainer::default);
 
 impl MutPool<SIZE, u8> for DefaultPool {
 	fn claim_one<'d>(&mut self) -> Seg<'d, SIZE, u8> {
 		self.0.pop().unwrap_or_else(|| Box::pin([0; SIZE])).into()
 	}
 
-	fn claim_count(&mut self, target: &mut SegRing<SIZE, u8>, count: usize) {
+	fn claim_count<'d>(&mut self, target: &mut impl Extend<Seg<'d, SIZE, u8>>, count: usize) where Self: Sized {
 		let existing = min(count, self.0.len());
 		let allocate = count - existing;
-		target.extend_back(
+		target.extend(
 			self.0
 				.drain(..existing)
 				.chain((0..allocate).map(|_| Box::pin([0; SIZE])))
@@ -151,9 +187,36 @@ impl MutPool<SIZE, u8> for DefaultPool {
 		}
 	}
 
-	fn collect(&mut self, segments: ring::Drain<SIZE, u8>) {
-		self.0.extend(segments.filter_map(Seg::into_block))
+	fn collect<'d>(&mut self, segments: impl IntoIterator<Item = Seg<'d, SIZE, u8>>) {
+		self.0.extend(segments.into_iter().filter_map(Seg::into_block))
 	}
 
 	fn shed(&mut self) { self.0.clear() }
+}
+
+// A workaround for bulk claiming and collection on a dyn pool. References are
+// sized, so implementing for a mutable reference exposes these for the trait object.
+// The catch is these cannot be implemented as bulk operations, they have to use
+// loops.
+impl<'a> MutPool<SIZE, u8> for &'a mut dyn MutPool<SIZE, u8> {
+	fn claim_one<'d>(&mut self) -> Seg<'d, SIZE, u8> {
+		(*self).claim_one()
+	}
+
+	fn claim_count<'d>(&mut self, target: &mut impl Extend<Seg<'d, SIZE, u8>>, count: usize)
+	where Self: Sized {
+		target.extend((0..count).map(|_| self.claim_one()))
+	}
+
+	fn collect_one(&mut self, segment: Seg<SIZE, u8>) {
+		(*self).collect_one(segment)
+	}
+
+	fn collect<'d>(&mut self, segments: impl IntoIterator<Item = Seg<'d, SIZE, u8>>) where Self: Sized {
+		for seg in segments {
+			self.collect_one(seg)
+		}
+	}
+
+	fn shed(&mut self) { (*self).shed() }
 }

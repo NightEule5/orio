@@ -19,7 +19,7 @@ pub const SIZE: usize = 8192;
 pub(crate) type Block<const N: usize, T> = Pin<Box<[T; N]>>;
 pub(crate) type SharedBlock<const N: usize, T> = Rc<Block<N, T>>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Buf<'d, const N: usize, T> {
 	Empty,
 	Block(SharedBlock<N, T>),
@@ -42,6 +42,10 @@ impl<const N: usize, T> Buf<'_, N, T> {
 		} else {
 			None
 		}
+	}
+
+	fn is_block(&self) -> bool {
+		matches!(self, Buf::Block(_))
 	}
 }
 
@@ -83,7 +87,7 @@ impl<'d, const N: usize, T> From<&'d [T]> for Buf<'d, N, T> {
 //  the same pattern but same source file) and rust#114212 (not from the same file
 //  but same pattern). I must bide my time waiting for the compiler team kills this
 //  eldritch horror and pray it doesn't rear its ugly head again in the meantime.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Seg<'d, const N: usize = 8192, T: Element = u8> {
 	buf: Buf<'d, N, T>,
 	off: usize,
@@ -101,6 +105,15 @@ impl<const N: usize, T: Element> Seg<'_, N, T> {
 			Buf::Empty => 0,
 			Buf::Slice(slice) => slice.len(),
 			_ => self.len.saturating_sub(self.off)
+		}
+	}
+
+	/// Returns the number of elements that can be written to the segment.
+	pub fn limit(&self) -> usize {
+		if self.buf.is_block() {
+			N - self.len
+		} else {
+			0
 		}
 	}
 

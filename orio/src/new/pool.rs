@@ -6,10 +6,9 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use super::element::Element;
-use super::segment::{Block, Seg, SIZE};
 use crate::new::ring;
-use crate::new::ring::RingBuf;
+use super::element::Element;
+use super::segment::{Drain as RingDrain, Block, Seg, SegRing, SIZE};
 use crate::SEGMENT_SIZE;
 
 #[derive(Debug, thiserror::Error)]
@@ -31,12 +30,12 @@ where for<'p> <Self::Ref<'p> as Deref>::Target: MutPool<N, T> {
 	}
 
 	/// Claims `count` segments into `target`.
-	fn claim_count(&self, target: &mut RingBuf<N, T>, count: usize) -> Result<(), Error> {
+	fn claim_count(&self, target: &mut SegRing<N, T>, count: usize) -> Result<(), Error> {
 		Ok(self.try_borrow()?.claim_count(target, count))
 	}
 
 	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size(&self, target: &mut RingBuf<N, T>, min_size: usize) -> Result<(), Error> {
+	fn claim_size(&self, target: &mut SegRing<N, T>, min_size: usize) -> Result<(), Error> {
 		Ok(self.try_borrow()?.claim_size(target, min_size))
 	}
 
@@ -49,7 +48,7 @@ where for<'p> <Self::Ref<'p> as Deref>::Target: MutPool<N, T> {
 
 	/// Collects many segments back into the pool. Handling of shared segments is
 	/// left up to implementation; the default implementation discards them.
-	fn collect(&self, segments: ring::Drain<N, T>) -> Result<(), Error> {
+	fn collect(&self, segments: RingDrain<N, T>) -> Result<(), Error> {
 		Ok(self.try_borrow()?.collect(segments))
 	}
 
@@ -75,10 +74,10 @@ pub trait MutPool<const N: usize, T: Element> {
 	fn claim_one<'d>(&mut self) -> Seg<'d, N, T>;
 
 	/// Claims `count` segments into `target`.
-	fn claim_count(&mut self, target: &mut RingBuf<N, T>, count: usize);
+	fn claim_count(&mut self, target: &mut SegRing<N, T>, count: usize);
 
 	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size(&mut self, target: &mut RingBuf<N, T>, min_size: usize) {
+	fn claim_size(&mut self, target: &mut SegRing<N, T>, min_size: usize) {
 		let count = min_size.next_multiple_of(SEGMENT_SIZE) / SEGMENT_SIZE;
 
 		self.claim_count(target, count)
@@ -89,7 +88,7 @@ pub trait MutPool<const N: usize, T: Element> {
 
 	/// Collects many segments back into the pool. Handling of shared segments is
 	/// left up to implementation; the default implementation discards them.
-	fn collect(&mut self, segments: ring::Drain<N, T>);
+	fn collect(&mut self, segments: RingDrain<N, T>);
 
 	/// Clears segments from the pool to free space. The actual segment count to be
 	/// cleared is left up to implementation.
@@ -135,7 +134,7 @@ impl MutPool<SIZE, u8> for DefaultPool {
 		self.0.pop().unwrap_or_else(|| Box::pin([0; SIZE])).into()
 	}
 
-	fn claim_count(&mut self, target: &mut RingBuf<SIZE, u8>, count: usize) {
+	fn claim_count(&mut self, target: &mut SegRing<SIZE, u8>, count: usize) {
 		let existing = min(count, self.0.len());
 		let allocate = count - existing;
 		target.extend_back(

@@ -2,7 +2,6 @@
 
 mod element;
 mod pool;
-mod ring;
 mod segment;
 
 pub use element::*;

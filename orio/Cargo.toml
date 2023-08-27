@@ -11,6 +11,7 @@ repository = "https://github.com/NightEule5/orio/"
 
 [features]
 default = ["secure-hash"]
+bytes = ["dep:bytes"]
 shared-pool = []
 hash = ["dep:digest"]
 secure-hash = ["groestl", "sha2", "sha3", "shabal", "whirlpool"]
@@ -41,6 +42,8 @@ whirlpool = { version = "0.10.4", optional = true }
 digest = { version = "0.10.6", optional = true, features = ["std"] }
 thiserror = "1.0.43"
 strum = { version = "0.25", features = ["derive"] }
+bytemuck = "1.13.1"
+bytes = { version = "1.4.0", optional = true }
 
 [dev-dependencies]
 base16ct = { version = "0.2.0", features = ["std"] }

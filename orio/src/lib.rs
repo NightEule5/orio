@@ -39,10 +39,11 @@
 
 #![allow(incomplete_features)]
 #![feature(
+	arbitrary_self_types,
 	associated_type_bounds,
 	associated_type_defaults,
-	drain_filter,
 	extend_one,
+	extract_if,
 	generic_const_exprs,
 	int_roundings,
 	io_error_other,
@@ -53,6 +54,7 @@
 	thread_local,
 	try_blocks,
 	type_alias_impl_trait,
+	vec_into_raw_parts,
 )]
 
 mod buffer;
@@ -65,6 +67,7 @@ pub mod pool;
 mod util;
 mod byte_str;
 mod std_io;
+mod new;
 
 pub use error::*;
 pub use buffer::*;

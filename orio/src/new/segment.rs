@@ -73,11 +73,21 @@ impl<'d, const N: usize, T> From<&'d [T]> for Buf<'d, N, T> {
 /// be claimed from the segment [pool](super::pool), and collected into it when
 /// finished. It's not recommended to let a segment drop instead of collecting it,
 /// unless you're sure it contains shared data.
+// Fixme: using SIZE in N causes a "type parameter out of range when substituting"
+//  ICE at generic_args.rs:900:9. I encounter my old nemesis once again. Substituting
+//  manually with a literal defeats it for now. Appears related to rust#114317 (not
+//  the same pattern but same source file) and rust#114212 (not from the same file
+//  but same pattern). I must bide my time waiting for the compiler team kills this
+//  eldritch horror and pray it doesn't rear its ugly head again in the meantime.
 #[derive(Clone)]
-pub struct Seg<'d, const N: usize = SIZE, T: Element = u8> {
+pub struct Seg<'d, const N: usize = 8192, T: Element = u8> {
 	buf: Buf<'d, N, T>,
 	off: usize,
 	len: usize
+}
+
+impl<'d> Default for Seg<'d> {
+	fn default() -> Self { Box::new([0; SIZE]).into() }
 }
 
 impl<const N: usize, T: Element> Seg<'_, N, T> {
@@ -373,5 +383,38 @@ impl<'d, const N: usize> From<Cow<'d, str>> for Seg<'d, N, u8> {
 impl<'d, const N: usize> From<&'d bytes::Bytes> for Seg<'d, N, u8> {
 	fn from(value: &'d bytes::Bytes) -> Self {
 		value.as_ref().into()
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::Seg;
+
+	const SLICE: &[u8] = b"Hello World!";
+
+	#[test]
+	fn slice_read() {
+		let mut word1 = [0; 5];
+		let mut word2 = [0; 5];
+		let mut seg: Seg = Seg::from(SLICE);
+		assert_eq!(seg.read(&mut word1), 5, "should read 5 bytes");
+		assert_eq!(seg.consume(1), 1, "should consume 1 byte");
+		assert_eq!(seg.read(&mut word2), 5, "should read 5 bytes");
+		assert_eq!(seg.consume(1), 1, "should consume 1 byte");
+		assert!(seg.is_empty(), "should be empty");
+		assert_eq!(&word1, b"Hello");
+		assert_eq!(&word2, b"World");
+	}
+
+	#[test]
+	fn slice_write() {
+		let len = SLICE.len();
+		let mut seg: Seg = Seg::default();
+		assert_eq!(seg.write(SLICE), Some(len), "should write {len} bytes");
+		assert_eq!(seg.off, 0, "off == 0");
+		assert_eq!(seg.len, len, "len == {len}");
+		assert_eq!(seg.as_slice(), SLICE, "contained bytes should match written bytes");
+		assert_eq!(seg.off, 0, "off == 0");
+		assert_eq!(seg.len, len, "len == {len}");
 	}
 }

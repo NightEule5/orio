@@ -47,6 +47,7 @@
 	generic_const_exprs,
 	int_roundings,
 	io_error_other,
+	new_uninit,
 	return_position_impl_trait_in_trait,
 	seek_stream_len,
 	slice_range,
@@ -54,7 +55,6 @@
 	thread_local,
 	try_blocks,
 	type_alias_impl_trait,
-	vec_into_raw_parts,
 )]
 
 mod buffer;

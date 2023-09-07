@@ -42,7 +42,7 @@ whirlpool = { version = "0.10.4", optional = true }
 digest = { version = "0.10.6", optional = true, features = ["std"] }
 thiserror = "1.0.43"
 strum = { version = "0.25", features = ["derive"] }
-bytemuck = "1.13.1"
+bytemuck = { version = "1.13.1", features = ["min_const_generics"] }
 bytes = { version = "1.4.0", optional = true }
 
 [dev-dependencies]

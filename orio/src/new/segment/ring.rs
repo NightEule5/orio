@@ -2,184 +2,237 @@
 
 use std::cmp::min;
 use std::collections::VecDeque;
-use crate::new::{Element, MutPool, Seg};
+use super::Seg;
 
-/// A ring buffer of [`Seg`]ments.
+// Todo: since shared segments may become writable later (when an Rc is dropped),
+//  currently the counted limit is a lower bound. Maybe add a separate "unwritable"
+//  limit count?
+
+/// A shareable, segmented ring buffer. Cloning shares segments in linear (`O(n)`)
+/// time.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SegRing<'a, const N: usize, T: Element> {
-	ring: VecDeque<Seg<'a, N, T>>,
-	/// The number of segments written.
+pub(crate) struct RBuf<T> {
+	buf: VecDeque<T>,
+	/// The number of readable segments in the buffer.
 	len: usize,
-	/// The number of elements stored.
+	/// The total size of space occupied by non-empty segments, including unusable
+	/// gaps between partial segments. For simplicity, this also counts the back
+	/// segment's limit.
+	size: usize,
+	/// The number of readable bytes in the buffer.
 	count: usize,
-	/// The number of elements that can be written before all segments are full.
+	/// The number of writable bytes in the buffer.
 	limit: usize,
-	/// The length of fragmentation, the total free space locked between partially
-	/// written and read segments.
-	frag_len: usize,
 }
 
-impl<'a, const N: usize, T: Element> SegRing<'a, N, T> {
-	/// Returns the number of segments written.
+impl<const N: usize> RBuf<Seg<'_, N>> {
+	/// The number of readable segments in the buffer.
 	pub fn len(&self) -> usize { self.len }
-	/// Returns the number of elements that can be written before claiming.
-	pub fn limit(&self) -> usize { self.limit }
-	/// Returns the number of elements written.
-	pub fn count(&self) -> usize { self.count }
-	/// Returns the length of fragmentation, the total free space locked between
-	/// partially written and read segments.
-	pub fn frag_len(&self) -> usize { self.frag_len }
-	/// Returns `true` if no data is written.
-	pub fn is_empty(&self) -> bool { self.count == 0 }
-	/// Returns `true` if data is written.
-	pub fn is_not_empty(&self) -> bool { self.count > 0 }
-	/// Returns `true` if the buffer contains empty segments.
-	fn has_empty(&self) -> bool { self.len < self.ring.len() }
-	/// Returns a count of empty segments in the buffer.
-	fn empty_count(&self) -> usize { self.ring.len() - self.len }
 
-	/// Pushes a partially read segment to the front of the buffer.
-	pub fn push_front(&mut self, seg: Seg<'a, N, T>) {
+	/// The number of segments in the buffer, counting empty segments.
+	pub fn capacity(&self) -> usize { self.buf.len() }
+
+	/// Returns the fragmentation length.
+	pub fn fragment_len(&self) -> usize {
+		self.size - self.count - self.back_limit()
+	}
+
+	/// Returns `true` if the buffer is empty.
+	pub fn is_empty(&self) -> bool { self.len == 0 }
+
+	/// Returns `true` if the buffer contains empty segments.
+	pub fn has_empty(&self) -> bool { self.len < self.capacity() }
+
+	/// Pushes `seg` to the front of the buffer.
+	pub fn push_front(&mut self, seg: Seg<'_, N>) {
+		self.size += seg.size();
+		if self.is_empty() {
+			self.limit += seg.limit();
+		}
+		self.len += 1;
+		self.count += seg.len();
+		self.buf.push_front(seg);
+	}
+
+	/// Pushes `seg` to the back of the buffer.
+	pub fn push_back(&mut self, seg: Seg<'_, N>) {
 		if seg.is_empty() {
 			self.push_empty(seg);
 			return
 		}
 
+		self.size += seg.size();
 		self.len += 1;
+		if !self.is_empty() {
+			self.limit -= self.back_limit();
+		}
 		self.count += seg.len();
-
-		if self.is_empty() {
-			self.limit += seg.limit();
-		} else {
-			self.frag_len += seg.limit();
-		}
-
-		self.ring.push_front(seg);
+		self.limit += seg.limit();
+		self.buf.push_back(seg);
 	}
 
-	/// Pushes a written or empty segment to the back of the deque.
-	pub fn push_back(&mut self, seg: Seg<'a, N, T>) {
-		if seg.is_empty() {
-			self.push_empty(seg);
+	/// Pops a readable segment from the front of the buffer.
+	pub fn pop_front(&mut self) -> Option<Seg<'_, N>> {
+		if !self.is_empty() {
+			let seg = self.buf.pop_front()?;
+			self.count -= seg.len();
+			if self.len == 1 {
+				self.limit -= self.back_limit();
+			}
+			self.len -= 1;
+			self.size -= seg.size();
+			Some(seg)
 		} else {
-			self.push_laden(seg);
+			None
 		}
 	}
 
-	/// Pops the front segment from the deque for reading.
-	pub fn pop_front(&mut self) -> Option<Seg<'a, N, T>> {
-		if self.is_empty() { return None }
-
-		let seg = self.ring.pop_front()?;
-
-		if self.is_empty() {
-			self.limit -= seg.limit();
-		} else {
-			self.frag_len -= seg.limit();
+	/// Pops a writable segment from the back of the buffer.
+	pub fn pop_back(&mut self) -> Option<Seg<'_, N>> {
+		let index = self.back_index();
+		if self.is_empty() || self.buf[index].is_full() {
+			return self.pop_empty()
 		}
 
-		self.len -= 1;
-		self.count -= seg.len();
-		Some(seg)
-	}
-
-	/// Pops the back-most unfilled segment from the deque for writing.
-	pub fn pop_back(&mut self) -> Option<Seg<'a, N, T>> {
 		let seg = if self.has_empty() {
-			// Faster to replace the popped segment with a fresh one from the back
-			// if possible.
-			self.ring.swap_remove_back(self.len)?
+			self.buf.swap_remove_back(index)?
 		} else {
-			self.ring.pop_back()?
+			self.buf.remove(index)?
 		};
 
-		self.len += 1;
-		self.limit -= seg.limit();
+		self.len -= 1;
+		self.size -= seg.size();
 		self.count -= seg.len();
+		self.limit -= seg.limit();
 		Some(seg)
 	}
 
-	/// Reserves at least `count` elements of free memory from `pool`.
-	pub fn reserve(&mut self, mut count: usize, pool: &mut impl MutPool<N, T>) {
-		count = count.saturating_sub(self.limit);
-		if count > 0 {
-			pool.claim_size(self, count);
+	/// Drains up to `count` segments from the buffer.
+	pub fn drain(&mut self, count: usize) -> impl Iterator<Item = Seg<'_, N>> + '_ {
+		// Drain all segments
+		if count >= self.capacity() {
+			self.len   = 0;
+			self.size  = 0;
+			self.count = 0;
+			self.limit = 0;
+		} else {
+			(self.size, self.count) -=
+				self.buf
+					.iter()
+					.take(min(count, self.len))
+					.map(|seg| (seg.size(), seg.limit()))
+					.sum();
+
+			if count >= self.back_index() {
+				self.limit -= self.back_limit();
+			}
+
+			self.limit -=
+				self.buf
+					.iter()
+					.take(count.saturating_sub(self.len))
+					.map(Seg::limit)
+					.sum();
+
+			if count <= self.len {
+				self.len -= count;
+			} else {
+				self.len = 0;
+			}
 		}
-	}
 
-	/// Clears the buffer, returning all its segments to `pool`.
-	pub fn clear(&mut self, pool: &mut impl MutPool<N, T>) {
-		pool.collect(self.ring.drain(..));
-		self.len = 0;
-		self.count = 0;
-		self.limit = 0;
-		self.frag_len = 0;
-	}
-
-	/// Returns up to `count` empty segments to `pool`.
-	pub fn trim(&mut self, mut count: usize, pool: &mut impl MutPool<N, T>) {
-		count = min(count, self.empty_count());
-		self.limit -= count * N;
-		let len = self.len;
-		pool.collect(self.ring.drain(len..len + count));
+		self.buf.drain(..min(count, self.capacity()))
 	}
 
 	/// Iterates over written segments.
-	pub fn iter(&self) -> impl Iterator<Item = &Seg<'a, N, T>> {
-		self.ring
-			.iter()
-			.take(self.len)
+	pub fn iter(&self) -> impl Iterator<Item = &Seg<'_, N>> + '_ {
+		self.buf.iter().take(self.len)
 	}
 
-	/// Iterates over written segments as slices.
-	pub fn slices(&self) -> impl Iterator<Item = &[T]> {
-		self.iter()
-			.map(|s| s.as_slice())
+	/// Iterates mutably over written segments.
+	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Seg<'_, N>> + '_ {
+		self.buf.iter_mut().take(self.len)
 	}
 }
 
-impl<'a, const N: usize, T: Element> SegRing<'a, N, T> {
-	fn last(&self) -> Option<&Seg<'_, N, T>> {
+impl<const N: usize> RBuf<Seg<'_, N>> {
+	fn back_index(&self) -> usize { self.len - 1 }
+
+	fn back_limit(&self) -> usize {
 		if self.is_empty() {
-			None
+			0
 		} else {
-			Some(&self.ring[self.len - 1])
+			self.buf[self.back_index()].limit()
 		}
 	}
 
-	fn push_empty(&mut self, seg: Seg<'a, N, T>) {
-		self.limit += N;
-		self.ring.push_back(seg);
+	fn push_empty(&mut self, seg: Seg<'_, N>) {
+		self.limit += seg.limit();
+		self.buf.push_back(seg);
 	}
 
-	fn push_laden(&mut self, seg: Seg<'a, N, T>) {
-		// Convert the last segment's limit to fragmentation.
-		let last_lim = self.last().map(Seg::limit).unwrap_or_default();
-		self.limit    -= last_lim;
-		self.frag_len += last_lim;
-		// Update the quantities with the new segment and push.
-		self.frag_len += seg.off;
-		self.limit += seg.limit();
-		self.count += seg.len();
-		self.ring.insert(self.len, seg);
-		self.len += 1;
+	fn pop_empty(&mut self) -> Option<Seg<'_, N>> {
+		if self.has_empty() {
+			let empty = self.buf.pop_back()?;
+			self.limit -= empty.limit();
+			Some(empty)
+		} else {
+			None
+		}
 	}
 }
 
-impl<'a, const N: usize, T: Element> Extend<Seg<'a, N, T>> for SegRing<'a, N, T> {
-	fn extend<I: IntoIterator<Item = Seg<'a, N, T>>>(&mut self, iter: I) {
-		let Self { ring, limit, .. } = self;
-		let cur_len = ring.len();
-		ring.extend(iter);
-		let new_len = ring.len();
-		*limit += (new_len - cur_len) * N;
+impl<'a, const N: usize> RBuf<Seg<'a, N>> {
+	fn push_many<T: IntoIterator<Item = Seg<'a, N>>>(&mut self, iter: T) {
+		let start = self.len;
+		// Temporarily rotate empty segments to the front before extending, in case
+		// iter contains non-empty segments.
+		self.buf.rotate_left(start);
+		self.buf.extend(iter);
+		let end = self.capacity();
+
+		// Partition non-empty segments ahead of empty segments.
+		let mut non_empty_len = 0;
+		for i in start..end {
+			let seg = &self.buf[i];
+			if seg.is_not_empty() && i > non_empty_len {
+				self.buf.swap(i, start + non_empty_len);
+				non_empty_len += 1;
+			}
+		}
+
+		if non_empty_len > 0 {
+			self.limit -= self.back_limit();
+			self.len += non_empty_len;
+			self.limit += self.back_limit();
+		}
+
+		self.size +=
+			self.buf
+				.range(start..end)
+				.map(Seg::size)
+				.sum();
+		self.limit +=
+			self.buf
+				.range(start + non_empty_len..end)
+				.map(Seg::limit)
+				.sum();
+
+		// Rotate the empty segments back.
+		self.buf.rotate_right(start);
+	}
+}
+
+impl<'a, const N: usize> Extend<Seg<'a, N>> for RBuf<Seg<'a, N>> {
+	fn extend<T: IntoIterator<Item = Seg<'a, N>>>(&mut self, iter: T) {
+		self.push_many(iter);
 	}
 
-	fn extend_one(&mut self, item: Seg<'a, N, T>) {
-		self.push_empty(item);
+	fn extend_one(&mut self, seg: Seg<'a, N>) {
+		self.push_back(seg);
 	}
 
 	fn extend_reserve(&mut self, additional: usize) {
-		self.ring.reserve(additional);
+		self.buf.reserve(additional);
 	}
 }

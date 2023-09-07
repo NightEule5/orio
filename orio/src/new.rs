@@ -7,3 +7,4 @@ mod segment;
 pub use element::*;
 pub use pool::*;
 pub use segment::*;
+pub(crate) use segment::RBuf;

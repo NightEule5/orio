@@ -29,7 +29,7 @@ pub struct Iter<'a, T: 'a> {
 	b: slice::Iter<'a, T>,
 }
 
-fn buf<const N: usize>() -> Box<[u8; N]> {
+pub fn buf<const N: usize>() -> Box<[u8; N]> {
 	// ~3x faster than new_zeroed and Box::new([0; N]) on my machine, when N is
 	// 8192, which makes sense, since we're not wasting cycles zeroing memory
 	// we're going to write to soon anyway. A speedup from 90ns to 30ns may not

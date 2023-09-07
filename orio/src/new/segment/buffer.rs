@@ -127,6 +127,12 @@ impl<const N: usize> From<BlockDeque<N>> for Buf<'_, N> {
 	}
 }
 
+impl<const N: usize> From<Box<[u8; N]>> for Buf<'_, N> {
+	fn from(value: Box<[u8; N]>) -> Self {
+		BlockDeque::from(value).into()
+	}
+}
+
 impl<const N: usize> From<Rc<VecDeque<u8>>> for Buf<'_, N> {
 	fn from(buf: Rc<VecDeque<u8>>) -> Self {
 		Self::Boxed(BoxedBuf { buf, off: 0, len: 0 })

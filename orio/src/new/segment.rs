@@ -11,6 +11,7 @@ use std::cmp::min;
 use std::ops::RangeBounds;
 use std::{mem, slice};
 use block_deque::BlockDeque;
+pub(crate) use block_deque::buf as alloc_block;
 use buffer::Buf;
 use util::SliceExt;
 

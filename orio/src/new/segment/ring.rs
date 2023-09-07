@@ -26,11 +26,17 @@ pub(crate) struct RBuf<T> {
 }
 
 impl<const N: usize> RBuf<Seg<'_, N>> {
-	/// The number of readable segments in the buffer.
+	/// Returns the number of readable segments in the buffer.
 	pub fn len(&self) -> usize { self.len }
 
-	/// The number of segments in the buffer, counting empty segments.
+	/// Returns the number of segments in the buffer, counting empty segments.
 	pub fn capacity(&self) -> usize { self.buf.len() }
+
+	/// Returns the number of bytes in the buffer.
+	pub fn count(&self) -> usize { self.count }
+
+	/// Returns the number of bytes that can be written to the buffer.
+	pub fn limit(&self) -> usize { self.limit }
 
 	/// Returns the fragmentation length.
 	pub fn fragment_len(&self) -> usize {

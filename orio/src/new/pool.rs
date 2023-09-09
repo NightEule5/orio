@@ -8,7 +8,7 @@ use std::ops::DerefMut;
 use std::rc::Rc;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use crate::new::{alloc_block, buf};
+use crate::new::alloc_block;
 use super::segment::{Seg, SIZE};
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]

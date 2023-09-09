@@ -6,7 +6,7 @@
 
 use std::{fmt, mem, slice};
 use std::iter::FusedIterator;
-use std::ops::{Range, RangeBounds};
+use std::ops::{IndexMut, Range, RangeBounds};
 use std::rc::Rc;
 use super::util::SliceExt;
 
@@ -74,10 +74,9 @@ impl<const N: usize> BlockDeque<N> {
 
 	/// Returns a mutable reference to the element at `index`.
 	pub fn get_mut(&mut self, index: usize) -> Option<&mut u8> {
-		let buf = self.buf()?;
 		(index < self.len).then(||
-			&mut buf[self.wrap(index)]
-		)
+			self.index_mut(self.wrap(index))
+		).flatten()
 	}
 
 	/// Returns a reference to the front element, or `None` if the deque is empty.
@@ -164,7 +163,7 @@ impl<const N: usize> BlockDeque<N> {
 
 		self.head = self.wrap_sub(1);
 		self.len += 1;
-		self.buf[self.head] = value;
+		*self.index_mut(self.head)? = value;
 		None
 	}
 
@@ -172,7 +171,7 @@ impl<const N: usize> BlockDeque<N> {
 	/// full or shared.
 	pub fn push_back(&mut self, value: u8) -> Option<u8> {
 		if self.is_full() { return Some(value) }
-		self.buf[self.wrap(self.head)] = value;
+		*self.index_mut(self.wrap(self.head))? = value;
 		self.len += 1;
 		None
 	}
@@ -209,7 +208,7 @@ impl<const N: usize> BlockDeque<N> {
 	/// Extends the deque with a slice `values`, returning the remaining slice, or
 	/// the whole slice if the deque is shared.
 	pub fn extend<'a>(&mut self, values: &'a [u8]) -> &'a [u8] {
-		&values[self.extend_n(values)..]
+		&values[self.extend_n(values).unwrap_or_default()..]
 	}
 
 	/// Drains the deque into a `target` slice, returning the number of bytes read.
@@ -222,7 +221,8 @@ impl<const N: usize> BlockDeque<N> {
 
 	/// Drains the deque into a `target` slice, returning the unfilled slice.
 	pub fn drain<'a>(&mut self, target: &'a mut [u8]) -> &'a mut [u8] {
-		&mut target[self.drain_n(target)..]
+		let n = self.drain_n(target);
+		&mut target[n..]
 	}
 
 	/// Removes `count` bytes from the deque.
@@ -251,8 +251,7 @@ impl<const N: usize> BlockDeque<N> {
 		let &mut Self { head, len, .. } = self;
 
 		if self.is_contiguous() {
-			let buf = self.buf()?;
-			return Some(&mut buf[head..head + len]);
+			return self.index_mut(head..head + len);
 		}
 
 		let free = N - len;
@@ -285,7 +284,7 @@ impl<const N: usize> BlockDeque<N> {
 		};
 
 		let &mut Self { head, len, .. } = self;
-		Some(&mut buf[head..head + len])
+		self.index_mut(head..head + len)
 	}
 
 	/// Consumes the deque, returning inner buffer if *exclusive* (unshared). The
@@ -296,6 +295,11 @@ impl<const N: usize> BlockDeque<N> {
 }
 
 impl<const N: usize> BlockDeque<N> {
+	fn index_mut<I, T: ?Sized>(&mut self, idx: I) -> Option<&mut T>
+	where [u8; N]: IndexMut<I, Output = T> {
+		self.buf().map(|array| &mut array[idx])
+	}
+
 	fn buf(&mut self) -> Option<&mut [u8; N]> {
 		Rc::get_mut(&mut self.buf).map(Box::as_mut)
 	}

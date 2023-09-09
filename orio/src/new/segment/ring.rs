@@ -25,7 +25,7 @@ pub(crate) struct RBuf<T> {
 	limit: usize,
 }
 
-impl<const N: usize> RBuf<Seg<'_, N>> {
+impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Returns the number of readable segments in the buffer.
 	pub fn len(&self) -> usize { self.len }
 
@@ -50,7 +50,7 @@ impl<const N: usize> RBuf<Seg<'_, N>> {
 	pub fn has_empty(&self) -> bool { self.len < self.capacity() }
 
 	/// Pushes `seg` to the front of the buffer.
-	pub fn push_front(&mut self, seg: Seg<'_, N>) {
+	pub fn push_front(&mut self, seg: Seg<'a, N>) {
 		self.size += seg.size();
 		if self.is_empty() {
 			self.limit += seg.limit();
@@ -61,7 +61,7 @@ impl<const N: usize> RBuf<Seg<'_, N>> {
 	}
 
 	/// Pushes `seg` to the back of the buffer.
-	pub fn push_back(&mut self, seg: Seg<'_, N>) {
+	pub fn push_back(&mut self, seg: Seg<'a, N>) {
 		if seg.is_empty() {
 			self.push_empty(seg);
 			return
@@ -117,17 +117,24 @@ impl<const N: usize> RBuf<Seg<'_, N>> {
 	pub fn drain(&mut self, count: usize) -> impl Iterator<Item = Seg<'_, N>> + '_ {
 		// Drain all segments
 		if count >= self.capacity() {
-			self.len   = 0;
-			self.size  = 0;
+			self.len = 0;
+			self.size = 0;
 			self.count = 0;
 			self.limit = 0;
 		} else {
-			(self.size, self.count) -=
+			let (size, count) =
 				self.buf
 					.iter()
-					.take(min(count, self.len))
+					.take(count)
 					.map(|seg| (seg.size(), seg.limit()))
-					.sum();
+					.reduce(|(mut s_sum, mut l_sum), (s_cur, l_cur)| {
+						s_sum += s_cur;
+						l_sum += l_cur;
+						(s_sum, l_sum)
+					})
+					.unwrap_or_default();
+			self.size -= size;
+			self.count -= count;
 
 			if count >= self.back_index() {
 				self.limit -= self.back_limit();
@@ -138,7 +145,7 @@ impl<const N: usize> RBuf<Seg<'_, N>> {
 					.iter()
 					.take(count.saturating_sub(self.len))
 					.map(Seg::limit)
-					.sum();
+					.sum::<usize>();
 
 			if count <= self.len {
 				self.len -= count;
@@ -150,18 +157,27 @@ impl<const N: usize> RBuf<Seg<'_, N>> {
 		self.buf.drain(..min(count, self.capacity()))
 	}
 
+	/// Drains up to `count` empty segments from the buffer.
+	pub fn drain_empty(&mut self, count: usize) -> impl Iterator<Item = Seg<'a, N>> + '_ {
+		let mut range = self.len..self.capacity();
+		let len = range.len();
+		range.start += len - min(len, count);
+		self.limit -= self.buf.range(range.clone()).map(Seg::limit).sum::<usize>();
+		self.buf.drain(range)
+	}
+
 	/// Iterates over written segments.
 	pub fn iter(&self) -> impl Iterator<Item = &Seg<'_, N>> + '_ {
 		self.buf.iter().take(self.len)
 	}
 
 	/// Iterates mutably over written segments.
-	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Seg<'_, N>> + '_ {
+	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Seg<'a, N>> + '_ {
 		self.buf.iter_mut().take(self.len)
 	}
 }
 
-impl<const N: usize> RBuf<Seg<'_, N>> {
+impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	fn back_index(&self) -> usize { self.len - 1 }
 
 	fn back_limit(&self) -> usize {
@@ -172,12 +188,12 @@ impl<const N: usize> RBuf<Seg<'_, N>> {
 		}
 	}
 
-	fn push_empty(&mut self, seg: Seg<'_, N>) {
+	fn push_empty(&mut self, seg: Seg<'a, N>) {
 		self.limit += seg.limit();
 		self.buf.push_back(seg);
 	}
 
-	fn pop_empty(&mut self) -> Option<Seg<'_, N>> {
+	fn pop_empty(&mut self) -> Option<Seg<'a, N>> {
 		if self.has_empty() {
 			let empty = self.buf.pop_back()?;
 			self.limit -= empty.limit();
@@ -217,12 +233,12 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			self.buf
 				.range(start..end)
 				.map(Seg::size)
-				.sum();
+				.sum::<usize>();
 		self.limit +=
 			self.buf
 				.range(start + non_empty_len..end)
 				.map(Seg::limit)
-				.sum();
+				.sum::<usize>();
 
 		// Rotate the empty segments back.
 		self.buf.rotate_right(start);

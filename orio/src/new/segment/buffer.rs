@@ -50,17 +50,16 @@ impl BoxedBuf {
 	pub fn as_mut_slices(&mut self) -> Option<(&mut [u8], &mut [u8])> {
 		let &mut Self { off, len, .. } = self;
 		let buf_len = self.buf.len();
-		let mut slices = self.buf()?.as_mut_slices();
+		let (mut a, mut b) = self.buf()?.as_mut_slices();
 		if len < buf_len {
-			let (a, b) = &mut slices;
 			let off_a = min(off, a.len());
 			let len_a = min(len, a.len());
-			*a = &mut a[off_a..off_a + len_a];
+			a = &mut a[off_a..off_a + len_a];
 			let off_b = min(off - off_a, b.len());
 			let len_b = min(len - len_a, b.len());
-			*b = &mut b[off_b..off_b + len_b];
+			b = &mut b[off_b..off_b + len_b];
 		}
-		Some(slices)
+		Some((a, b))
 	}
 
 	pub fn clear(&mut self) {
@@ -71,8 +70,9 @@ impl BoxedBuf {
 	}
 
 	pub fn impose(&mut self) {
-		if self.off > 0 || self.len < self.buf.len() {
-			let Some(buf) = self.buf() else { return };
+		let Self { buf, off, len } = self;
+		if *off > 0 || *len < buf.len() {
+			let Some(buf) = Rc::get_mut(buf) else { return };
 			buf.drain(..self.off);
 			self.off = 0;
 			buf.truncate(self.len);
@@ -157,8 +157,8 @@ impl<'d, const N: usize> From<String> for Buf<'_, N> {
 	}
 }
 
-impl<const N: usize> From<Cow<'_, str>> for Buf<'_, N> {
-	fn from(value: Cow<'_, str>) -> Self {
+impl<'a, const N: usize> From<Cow<'a, str>> for Buf<'a, N> {
+	fn from(value: Cow<'a, str>) -> Self {
 		match value {
 			Cow::Borrowed(slice) => slice.into(),
 			Cow::Owned   (owned) => owned.into()
@@ -166,8 +166,8 @@ impl<const N: usize> From<Cow<'_, str>> for Buf<'_, N> {
 	}
 }
 
-impl<const N: usize> From<Cow<'_, [u8]>> for Buf<'_, N> {
-	fn from(value: Cow<'_, [u8]>) -> Self {
+impl<'a, const N: usize> From<Cow<'a, [u8]>> for Buf<'a, N> {
+	fn from(value: Cow<'a, [u8]>) -> Self {
 		match value {
 			Cow::Borrowed(slice) => slice.into(),
 			Cow::Owned   (owned) => owned.into()
@@ -175,27 +175,27 @@ impl<const N: usize> From<Cow<'_, [u8]>> for Buf<'_, N> {
 	}
 }
 
-impl<const N: usize> From<&[u8]> for Buf<'_, N> {
-	fn from(value: &[u8]) -> Self {
+impl<'a, const N: usize> From<&'a [u8]> for Buf<'a, N> {
+	fn from(value: &'a [u8]) -> Self {
 		Self::Slice(value)
 	}
 }
 
-impl<const N: usize> From<&str> for Buf<'_, N> {
-	fn from(value: &str) -> Self {
+impl<'a, const N: usize> From<&'a str> for Buf<'a, N> {
+	fn from(value: &'a str) -> Self {
 		value.as_bytes().into()
 	}
 }
 
-impl<const N: usize, T: bytemuck::NoUninit> From<&[T]> for Buf<'_, N> {
-	default fn from(value: &[T]) -> Self {
+impl<'a, const N: usize, T: bytemuck::NoUninit> From<&'a [T]> for Buf<'a , N> {
+	default fn from(value: &'a [T]) -> Self {
 		Self::Slice(bytemuck::cast_slice(value))
 	}
 }
 
 #[cfg(feature = "bytes")]
-impl<const N: usize> From<&bytes::Bytes> for Buf<'_, N> {
-	fn from(value: &bytes::Bytes) -> Self {
+impl<'a, const N: usize> From<&'a bytes::Bytes> for Buf<'a, N> {
+	fn from(value: &'a bytes::Bytes) -> Self {
 		value.as_ref().into()
 	}
 }

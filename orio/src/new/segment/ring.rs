@@ -2,6 +2,7 @@
 
 use std::cmp::min;
 use std::collections::VecDeque;
+use std::mem;
 use super::Seg;
 
 // Todo: since shared segments may become writable later (when an Rc is dropped),
@@ -113,6 +114,11 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		Some(seg)
 	}
 
+	/// Returns a cursor for reading segments.
+	pub fn read(&mut self) -> Option<ReadCursor<'a, '_, N>> {
+		(!self.is_empty()).then(|| ReadCursor::new(self))
+	}
+
 	/// Drains up to `count` segments from the buffer.
 	pub fn drain(&mut self, count: usize) -> impl Iterator<Item = Seg<'_, N>> + '_ {
 		// Drain all segments
@@ -165,6 +171,11 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		self.limit -= self.buf.range(range.clone()).map(Seg::limit).sum::<usize>();
 		self.buf.drain(range)
 	}
+	
+	/// Drains all empty segments from the buffer.
+	pub fn drain_all_empty(&mut self) -> impl Iterator<Item = Seg<'a, N>> + '_ {
+		self.drain_empty(self.capacity() - self.len)
+	}
 
 	/// Iterates over written segments.
 	pub fn iter(&self) -> impl Iterator<Item = &Seg<'_, N>> + '_ {
@@ -202,6 +213,12 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			None
 		}
 	}
+
+	/// Rotates empty segments to the back.
+	fn rotate_back(&mut self, count: usize) {
+		self.buf.rotate_left(count);
+		self.len -= count;
+	}
 }
 
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
@@ -209,7 +226,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		let start = self.len;
 		// Temporarily rotate empty segments to the front before extending, in case
 		// iter contains non-empty segments.
-		self.buf.rotate_left(start);
+		self.buf.rotate_right(start);
 		self.buf.extend(iter);
 		let end = self.capacity();
 
@@ -241,7 +258,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 				.sum::<usize>();
 
 		// Rotate the empty segments back.
-		self.buf.rotate_right(start);
+		self.rotate_back(start);
 	}
 }
 
@@ -256,5 +273,144 @@ impl<'a, const N: usize> Extend<Seg<'a, N>> for RBuf<Seg<'a, N>> {
 
 	fn extend_reserve(&mut self, additional: usize) {
 		self.buf.reserve(additional);
+	}
+}
+
+#[derive(Debug)]
+pub(crate) struct ReadCursor<'a: 'b, 'b, const N: usize> {
+	buf: &'b mut RBuf<Seg<'a, N>>,
+	off: usize,
+	len: usize,
+	dirty: bool,
+	empty_len: usize,
+	cur_size:  usize,
+	cur_count: usize,
+	cur_limit: usize,
+}
+
+impl<'a: 'b, 'b, const N: usize> ReadCursor<'a, 'b, N> {
+	pub fn get(&self) -> &Seg<'a, N> {
+		&self.buf.buf[self.off]
+	}
+
+	pub fn get_mut(&mut self) -> &mut Seg<'a, N> {
+		&mut self.buf.buf[self.off]
+	}
+
+	pub fn has_next(&mut self) -> bool { !self.is_back() }
+	pub fn has_prev(&mut self) -> bool { self.off > 0 }
+
+	pub fn next(&mut self) -> Option<&mut Seg<'a, N>> {
+		self.update();
+		if !self.has_next() { return None }
+		self.off += 1;
+		self.reset();
+		Some(self.get_mut())
+	}
+
+	pub fn prev(&mut self) -> Option<&mut Seg<'a, N>> {
+		self.update();
+		if !self.has_prev() { return None }
+		self.off -= 1;
+		self.reset();
+		Some(self.get_mut())
+	}
+
+	pub fn front(&mut self) -> Option<&mut Seg<'a, N>> {
+		self.update();
+		if self.len == 0 { return None }
+		self.off = 0;
+		self.reset();
+		Some(self.get_mut())
+	}
+
+	pub fn swap(&mut self, seg: &mut Seg<'a, N>) -> bool {
+		if self.len > 0 {
+			mem::swap(self.get_mut(), seg);
+			true
+		} else {
+			false
+		}
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> ReadCursor<'a, 'b, N> {
+	fn new(buf: &'b mut RBuf<Seg<'a, N>>) -> Self {
+		let len = buf.len;
+		let front = &buf.buf[0];
+		let cur_size = front.size();
+		let cur_count = front.len();
+		let cur_limit = front.limit();
+
+		Self {
+			buf,
+			off: 0,
+			len,
+			dirty: true,
+			empty_len: 0,
+			cur_size,
+			cur_count,
+			cur_limit
+		}
+	}
+
+	fn is_back(&self) -> bool {
+		self.off + 1 == self.len
+	}
+
+	fn reset(&mut self) {
+		let cur = self.get();
+		let cur_size = cur.size();
+		let cur_count = cur.len();
+		let cur_limit = cur.limit();
+		self.dirty = true;
+		self.cur_size = cur_size;
+		self.cur_count = cur_count;
+		self.cur_limit = cur_limit;
+	}
+
+	fn update(&mut self) {
+		if !self.dirty { return }
+
+		let seg = self.get();
+		let delta_size  = seg.size () as isize - self.cur_size  as isize;
+		let delta_count = seg.len  () as isize - self.cur_count as isize;
+		let delta_limit = seg.limit() as isize - self.cur_limit as isize;
+		if seg.is_empty() {
+			self.empty_len += 1;
+		} else if self.cur_count == 0 {
+			self.empty_len -= 1;
+		}
+
+		let is_back = self.is_back();
+		let RBuf { size, count, limit, .. } = self.buf;
+		*size  = size .saturating_add_signed(delta_size );
+		*count = count.saturating_add_signed(delta_count);
+		if is_back {
+			*limit = limit.saturating_add_signed(delta_limit);
+		}
+
+		self.dirty = false;
+	}
+
+	fn rotate_empty(&mut self) {
+		let empty_limit: usize =
+			self.buf
+				.buf
+				.range(..self.empty_len)
+				.map(Seg::limit)
+				.sum();
+		self.buf.limit += empty_limit;
+		self.buf.rotate_back(self.empty_len);
+		self.off = 0;
+		self.len = self.buf.len();
+		self.empty_len = 0;
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> Drop for ReadCursor<'a, 'b, N> {
+	fn drop(&mut self) {
+		self.update();
+		self.rotate_empty();
 	}
 }

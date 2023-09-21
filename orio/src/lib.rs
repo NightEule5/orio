@@ -46,7 +46,6 @@
 	extract_if,
 	generic_const_exprs,
 	int_roundings,
-	io_error_other,
 	new_uninit,
 	return_position_impl_trait_in_trait,
 	seek_stream_len,

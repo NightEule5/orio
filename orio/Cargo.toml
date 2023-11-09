@@ -41,9 +41,9 @@ shabal = { version = "0.4.1", optional = true }
 whirlpool = { version = "0.10.4", optional = true }
 digest = { version = "0.10.6", optional = true, features = ["std"] }
 thiserror = "1.0.43"
-strum = { version = "0.25", features = ["derive"] }
 bytemuck = { version = "1.13.1", features = ["min_const_generics"] }
 bytes = { version = "1.4.0", optional = true }
+amplify_derive = "4.0.0"
 
 [dev-dependencies]
 base16ct = { version = "0.2.0", features = ["std"] }

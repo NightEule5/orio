@@ -72,7 +72,3 @@ pub use buffer::*;
 pub use segment::*;
 pub use byte_str::*;
 pub use std_io::*;
-
-pub type Result<T = (), E = Error> = std::result::Result<T, E>;
-
-type ErrorBox = Box<dyn std::error::Error + Send + Sync + 'static>;

@@ -17,6 +17,27 @@ mod void;
 pub use seeking::*;
 pub use void::*;
 
+/// An "stream closed" error.
+#[derive(Copy, Clone, Debug, Default, thiserror::Error)]
+#[error("stream closed")]
+pub struct StreamClosed;
+/// An end-of-stream error.
+#[derive(Copy, Clone, Debug, Default, thiserror::Error)]
+#[error("premature end-of-stream{}", self.format_req())]
+pub struct EndOfStream {
+	/// The number of bytes required for reading.
+	pub required_count: Option<usize>
+}
+
+impl EndOfStream {
+	fn format_req(&self) -> fmt::Arguments<'_> {
+		self.required_count.map_or_else(
+			Default::default,
+			|n| format_args!("(required {n} bytes)")
+		)
+	}
+}
+
 /// A data source.
 pub trait Source {
 	/// Reads `count` bytes from the source into the buffer.

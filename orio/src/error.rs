@@ -1,160 +1,229 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt, io};
-use crate::streams::OffsetUtf8Error;
-use crate::pool::Error as PoolError;
-use crate::ErrorBox;
+mod utf8;
 
-/// The error type Orio `Buffer`s, `Source`s and `Sink`s, etc.
-#[derive(Debug, thiserror::Error)]
-#[error("{source}")]
-pub struct Error {
-	pub context: Context,
-	pub source: SourceError,
+use std::{error, fmt, io};
+use std::rc::Rc;
+use amplify_derive::{Display, From};
+use thiserror::Error;
+use crate::streams::{EndOfStream, StreamClosed};
+use crate::pool::PoolError;
+pub use utf8::*;
+
+mod sealed {
+	use std::fmt::{Debug, Display};
+
+	pub trait Context: Copy + Clone + Debug + Display + Default {}
+	impl Context for super::StreamContext { }
+	impl Context for super::BufferContext { }
 }
 
-/// The source error encountered.
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-#[non_exhaustive]
-pub enum SourceError {
-	/// The underlying stream is closed.
-	#[error("stream closed")]
-	Closed,
-	/// End-of-stream was reached prematurely.
-	#[error("premature end-of-stream")]
-	Eos,
-	/// An IO error.
-	Io(io::Error),
-	/// A segment pool error.
-	Pool(#[from] PoolError),
-	/// Invalid UTF-8 was encountered.
-	Utf8(#[from] OffsetUtf8Error),
-	/// An unknown error.
-	Unknown(#[from] ErrorBox),
+pub type BufferError = Error<BufferContext>;
+pub type StreamError = Error<StreamContext>;
+pub type BufferResult<T = ()> = Result<T, BufferError>;
+pub type StreamResult<T = ()> = Result<T, StreamError>;
+
+/// An IO error.
+#[derive(Clone, Debug, From)]
+pub struct Error<C: sealed::Context> {
+	#[from]
+	#[from(io::Error)]
+	#[from(Utf8Error)]
+	#[from(PoolError)]
+	#[from(StreamError)]
+	#[from(BufferError)]
+	source: ErrorSource,
+	context: C
 }
 
-/// The operation attempted when the error was encountered.
-#[derive(Copy, Clone, Debug, Default, strum::EnumIs)]
-#[non_exhaustive]
-pub enum Context {
-	/// Unknown operation.
+/// Context of what a buffer was doing when the error occurred.
+#[derive(Copy, Clone, Debug, Display, Default)]
+pub enum BufferContext {
 	#[default]
-	Unknown,
+	#[display("<none>")]
+	#[doc(hidden)]
+	None,
 	/// Reading from the buffer.
-	BufRead,
+	#[display("reading")]
+	Read,
 	/// Writing to the buffer.
-	BufWrite,
+	#[display("writing")]
+	Write,
 	/// Copying the buffer.
-	BufCopy,
+	#[display("copying")]
+	Copy,
+	/// Filling the buffer.
+	#[display("filling")]
+	Fill,
+	/// Draining the buffer.
+	#[display("draining")]
+	Drain,
 	/// Clearing the buffer.
-	BufClear,
-	/// Flushing the buffer.
-	BufFlush,
+	#[display("clearing")]
+	Clear,
+	/// Reserving space in the buffer.
+	#[display("reserving in")]
+	Reserve,
+	/// Resizing the buffer.
+	#[display("resizing")]
+	Resize,
 	/// Compacting the buffer.
-	BufCompact,
-	/// Seeking the underlying stream.
-	StreamSeek,
-	/// Other operation described with a string.
+	#[display("compacting")]
+	Compact,
+}
+
+/// Context of what a stream was doing when the error occurred.
+#[derive(Copy, Clone, Debug, Display, Default, From)]
+pub enum StreamContext {
+	#[default]
+	#[display("<none>")]
+	#[doc(hidden)]
+	None,
+	/// A buffering operation.
+	#[display("{_0} buffer")]
+	Buffer(BufferContext),
+	/// Reading from a source.
+	#[display("reading from source")]
+	Read,
+	/// Writing to a sink.
+	#[display("writing to sink")]
+	Write,
+	/// Other operation described by a string.
+	#[display(inner)]
 	Other(&'static str),
 }
 
-pub(crate) trait ResultExt<T> {
-	fn context(self, context: Context) -> crate::Result<T>;
+/// The error source.
+#[derive(Clone, Debug, Error, From)]
+#[error(transparent)]
+pub enum ErrorSource {
+	/// The underlying stream is closed.
+	Closed(StreamClosed),
+	/// End-of-stream was reached prematurely.
+	Eos(EndOfStream),
+	/// An IO error.
+	Io(#[from(io::Error)] Rc<io::Error>), // Rc to get around io::Error not implementing Clone
+	/// A UTF-8 decode error.
+	Utf8(#[from] Utf8Error),
+	/// A pool error.
+	Pool(#[from] PoolError),
+	/// A stream error.
+	Stream(#[from(StreamError)] Box<StreamError>),
+	/// A buffer error.
+	Buffer(#[from(BufferError)] Box<BufferError>),
 }
 
-impl Error {
-	pub fn new(context: Context, source: SourceError) -> Self {
-		Self { context, source }
-	}
-
-	pub fn closed(context: Context) -> Self {
-		Self::new(context, SourceError::Closed)
-	}
-
-	pub fn eos(context: Context) -> Self {
-		Self::new(context, SourceError::Eos)
-	}
+pub trait ResultContext<T, C: sealed::Context> {
+	fn context(self, context: C) -> Result<T, Error<C>>;
 }
 
-impl From<SourceError> for Error {
-	fn from(value: SourceError) -> Self {
-		Self::new(Context::Unknown, value)
-	}
-}
-
-impl From<io::Error> for Error {
-	fn from(value: io::Error) -> Self {
-		<Self as From<SourceError>>::from(value.into())
-	}
-}
-
-impl From<PoolError> for Error {
-	fn from(value: PoolError) -> Self {
-		<Self as From<SourceError>>::from(value.into())
-	}
-}
-
-impl From<OffsetUtf8Error> for Error {
-	fn from(value: OffsetUtf8Error) -> Self {
-		<Self as From<SourceError>>::from(value.into())
-	}
-}
-
-impl From<ErrorBox> for Error {
-	fn from(value: ErrorBox) -> Self {
-		<Self as From<SourceError>>::from(value.into())
-	}
-}
-
-impl From<io::Error> for SourceError {
-	fn from(value: io::Error) -> Self {
-		if let io::ErrorKind::UnexpectedEof = value.kind() {
-			Self::Eos
-		} else {
-			Self::Io(value)
-		}
-	}
-}
-
-use simdutf8::compat::Utf8Error;
-
-impl From<Utf8Error> for SourceError {
-	fn from(value: Utf8Error) -> Self {
-		<Self as From<OffsetUtf8Error>>::from(value.into())
-	}
-}
-
-impl Context {
-	pub fn as_str(&self) -> &'static str {
-		match self {
-			Context::Unknown    => "unknown operation",
-			Context::BufRead    => "read from buffer",
-			Context::BufWrite   => "write to buffer",
-			Context::BufCopy    => "copy buffer",
-			Context::BufClear   => "clear buffer",
-			Context::BufFlush   => "flush buffer",
-			Context::BufCompact => "compact buffer",
-			Context::StreamSeek => "seek stream",
-			Context::Other(ctx) => ctx,
-		}
-	}
-}
-
-impl fmt::Display for Context {
+impl<C: sealed::Context> fmt::Display for Error<C> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(self.as_str())
+		match (self, f.alternate()) {
+			(Self { source, context }, true ) => write!(f, "{source} while {context}"),
+			(Self { source, ..      }, false) => fmt::Display::fmt(source, f)
+		}
 	}
 }
 
-impl<T, E: Into<SourceError>> ResultExt<T> for Result<T, E> {
-	fn context(self, context: Context) -> crate::Result<T> {
+impl<C: sealed::Context> error::Error for Error<C> {
+	fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+		self.source.source()
+	}
+}
+
+impl<C: sealed::Context> Error<C> {
+	/// Gets the error context.
+	pub fn context(&self) -> C {
+		self.context
+	}
+
+	/// Returns true if the inner error is a "closed stream".
+	pub fn is_closed(&self) -> bool {
+		matches!(&self.source, ErrorSource::Closed(_))
+	}
+
+	/// Returns true if the inner error is an "end-of-stream".
+	pub fn is_eos(&self) -> bool {
+		matches!(&self.source, ErrorSource::Eos(_));
+	}
+
+	/// Returns true if the inner error is an IO error.
+	pub fn is_io_error(&self) -> bool {
+		self.as_io_error().is_some()
+	}
+
+	/// Returns true if the inner error is a UTF-8 decode error.
+	pub fn is_utf8_error(&self) -> bool {
+		self.as_utf8_error().is_some()
+	}
+
+	/// Returns true if the inner error is a pool error.
+	pub fn is_pool_error(&self) -> bool {
+		self.as_pool_error().is_some()
+	}
+
+	/// Returns true if the inner error is a stream error.
+	pub fn is_stream_error(&self) -> bool {
+		self.as_stream_error().is_some()
+	}
+
+	/// Returns true if the inner error is a buffer error.
+	pub fn is_buffer_error(&self) -> bool {
+		self.as_buffer_error().is_some()
+	}
+
+	/// Returns the inner error as a "stream closed" error.
+	pub fn as_closed(&self) -> Option<&StreamClosed> {
+		let ErrorSource::Closed(error) = &self.source else { return None };
+		Some(error)
+	}
+
+	/// Returns the inner error as an "end-of-stream" error.
+	pub fn as_eos(&self) -> Option<&EndOfStream> {
+		let ErrorSource::Eos(error) = &self.source else { return None };
+		Some(error)
+	}
+
+	/// Returns the inner error as an IO error.
+	pub fn as_io_error(&self) -> Option<&io::Error> {
+		let ErrorSource::Io(error) = &self.source else { return None };
+		Some(error)
+	}
+
+	/// Returns the inner error as a UTF-8 decode error.
+	pub fn as_utf8_error(&self) -> Option<&Utf8Error> {
+		let ErrorSource::Utf8(error) = &self.source else { return None };
+		Some(error)
+	}
+
+	/// Returns the inner error as a pool error.
+	pub fn as_pool_error(&self) -> Option<&PoolError> {
+		let ErrorSource::Pool(error) = &self.source else { return None };
+		Some(error)
+	}
+
+	/// Returns the inner error as a stream error.
+	pub fn as_stream_error(&self) -> Option<&StreamError> {
+		let ErrorSource::Stream(error) = &self.source else { return None };
+		Some(error)
+	}
+
+	/// Returns the inner error as a buffer error.
+	pub fn as_buffer_error(&self) -> Option<&BufferError> {
+		let ErrorSource::Buffer(error) = &self.source else { return None };
+		Some(error)
+	}
+}
+
+impl<T, C: sealed::Context, E: Into<ErrorSource>> ResultContext<T, C> for Result<T, Error<C>> {
+	fn context(self, context: C) -> Result<T, Error<C>> {
 		self.map_err(|err| Error::new(context, err.into()))
 	}
 }
 
-impl<T> ResultExt<T> for crate::Result<T> {
-	fn context(mut self, context: Context) -> Self {
+impl<T, C: sealed::Context> ResultContext<T, C> for Result<T, Error<C>> {
+	fn context(mut self, context: C) -> Self {
 		if let Err(ref mut error) = self {
 			error.context = context;
 		}

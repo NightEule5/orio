@@ -66,11 +66,10 @@ pub mod pool;
 mod util;
 mod byte_str;
 mod std_io;
-mod new;
 
 pub use error::*;
 pub use buffer::*;
-pub use segment::{Segment, SIZE as SEGMENT_SIZE};
+pub use segment::*;
 pub use byte_str::*;
 pub use std_io::*;
 

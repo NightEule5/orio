@@ -8,7 +8,7 @@ use std::{fmt, mem, slice};
 use std::iter::FusedIterator;
 use std::ops::{IndexMut, Range, RangeBounds};
 use std::rc::Rc;
-use super::util::SliceExt;
+use super::SliceExt;
 
 /// A lightweight, fixed-size deque based on [`VecDeque`].
 ///

@@ -8,7 +8,7 @@ mod util;
 pub(crate) use ring::*;
 
 use std::cmp::min;
-use std::ops::RangeBounds;
+use std::ops::{Index, RangeBounds};
 use std::{mem, slice};
 use block_deque::BlockDeque;
 pub(crate) use block_deque::buf as alloc_block;
@@ -99,6 +99,16 @@ impl<'d, const N: usize> Seg<'d, N> {
 		}
 	}
 
+	/// Returns a pair of slices, in order, containing the segment contents within
+	/// `range`.
+	pub fn as_slices_in_range<R: RangeBounds<usize>>(&self, range: R) -> (&[u8], &[u8]) {
+		match &self.0 {
+			Buf::Block(block) => block.as_slices_in_range(range),
+			Buf::Boxed(boxed) => boxed.as_slices_in_range(range),
+			Buf::Slice(slice) => (&slice[range], &[]),
+		}
+	}
+
 	/// Makes the segment writable if its contents are shared, by allocating a new
 	/// block and copying the shared contents into it. If the data is too large for
 	/// a single block, a segment containing the remaining shared data is returned.
@@ -135,6 +145,17 @@ impl<'d, const N: usize> Seg<'d, N> {
 	/// copied.
 	pub fn copy(&mut self, buf: &mut [u8]) -> usize {
 		buf.copy_from_pair(self.as_slices())
+	}
+
+	/// Writes data from `other` into the segment to fill empty space if the segment
+	/// is writable, returning the number of bytes written, or `None` if the segment
+	/// contains shared data.
+	pub fn write_from<const O: usize>(&mut self, other: &mut Seg<'_, O>) -> Option<usize> {
+		let (a, b) = other.as_slices();
+		let mut written = self.write(a)?;
+		written += self.write(b)?;
+		other.consume_unchecked(written);
+		Some(written)
 	}
 
 	/// Reads the segment's contents into `buf` and consumes the data, returning
@@ -221,7 +242,24 @@ impl<'d, const N: usize> Seg<'d, N> {
 	}
 }
 
+impl<'d, const N: usize> Index<usize> for Seg<'d, N> {
+	type Output = u8;
+
+	fn index(&self, index: usize) -> &u8 {
+		let (a, b) = self.as_slices();
+		if index < a.len() {
+			&a[index]
+		} else {
+			&b[index]
+		}
+	}
+}
+
 impl<'d, const N: usize> Seg<'d, N> {
+	pub(crate) fn is_slice(&self) -> bool {
+		matches!(self.0, Buf::Slice(_))
+	}
+
 	fn consume_unchecked(&mut self, count: usize) {
 		match &mut self.0 {
 			Buf::Block(block) => block.remove_count(count),

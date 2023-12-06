@@ -6,6 +6,7 @@ use std::cell::{BorrowMutError, RefCell, RefMut};
 use std::default::Default;
 use std::ops::DerefMut;
 use std::rc::Rc;
+use std::result;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use crate::new::alloc_block;
@@ -15,6 +16,8 @@ use super::segment::{Seg, SIZE};
 #[derive(Copy, Clone, Debug, thiserror::Error)]
 #[error("failed to borrow the pool")]
 pub struct PoolError;
+
+pub type Result<T = ()> = result::Result<T, PoolError>;
 
 impl From<BorrowMutError> for PoolError {
 	fn from(_: BorrowMutError) -> Self { Self }
@@ -29,29 +32,29 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 	type Ref<'p>: DerefMut<Target = Self::Pool> where Self: 'p;
 
 	/// Borrows the pool mutably, locking it for the duration of the borrow.
-	fn try_borrow(&self) -> Result<Self::Ref<'_>, PoolError>;
+	fn try_borrow(&self) -> Result<Self::Ref<'_>>;
 
 	/// Claims a single segment.
-	fn claim_one<'d>(&self) -> Result<Seg<'d, N>, PoolError> {
+	fn claim_one<'d>(&self) -> Result<Seg<'d, N>> {
 		Ok(self.try_borrow()?.claim_one())
 	}
 
 	/// Claims `count` segments into `target`.
-	fn claim_count<'d>(&self, target: &mut impl Extend<Seg<'d, N>>, count: usize) -> Result<(), PoolError> {
+	fn claim_count<'d>(&self, target: &mut impl Extend<Seg<'d, N>>, count: usize) -> Result {
 		use hack::MutPoolSpec;
 
 		Ok(self.try_borrow()?.claim_count_spec(target, count))
 	}
 
 	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size<'d>(&self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize) -> Result<(), PoolError> {
+	fn claim_size<'d>(&self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize) -> Result {
 		use hack::MutPoolSpec;
 
 		Ok(self.try_borrow()?.claim_size_spec(target, min_size))
 	}
 
 	/// Collects a single segment back into the pool.
-	fn collect_one(&self, segment: Seg<N>) -> Result<(), PoolError> {
+	fn collect_one(&self, segment: Seg<N>) -> Result {
 		if segment.is_shared() { return Ok(()) }
 
 		Ok(self.try_borrow()?.collect_one(segment))
@@ -59,7 +62,7 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 
 	/// Collects many segments back into the pool. Handling of shared segments is
 	/// left up to implementation; the default implementation discards them.
-	fn collect<'d>(&self, segments: impl IntoIterator<Item = Seg<'d, N>>) -> Result<(), PoolError> {
+	fn collect<'d>(&self, segments: impl IntoIterator<Item = Seg<'d, N>>) -> Result {
 		use hack::MutPoolSpec;
 
 		Ok(self.try_borrow()?.collect_spec(segments))
@@ -67,7 +70,7 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 
 	/// Clears segments from the pool to free space. The actual segment count to be
 	/// cleared is left up to implementation.
-	fn shed(&self) -> Result<(), PoolError> {
+	fn shed(&self) -> Result {
 		Ok(self.try_borrow()?.shed())
 	}
 }
@@ -162,7 +165,7 @@ where P: MutPool<N> + ?Sized,
 	type Pool = P;
 	type Ref<'p> = RefMut<'p, P>;
 
-	fn try_borrow(&self) -> Result<Self::Ref<'_>, PoolError> {
+	fn try_borrow(&self) -> Result<Self::Ref<'_>> {
 		Ok(self.0.try_borrow_mut()?)
 	}
 }

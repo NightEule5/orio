@@ -56,6 +56,16 @@ impl Utf8Error {
 	}
 }
 
+impl Utf8ErrorKind {
+	pub fn is_invalid_sequence(&self) -> bool {
+		matches!(self, Self::InvalidSequence)
+	}
+	
+	pub fn is_incomplete_char(&self) -> bool {
+		matches!(self, Self::IncompleteChar)
+	}
+}
+
 impl From<compat::Utf8Error> for Utf8Error {
 	fn from(value: compat::Utf8Error) -> Self {
 		if let Some(error_len) = value.error_len() {

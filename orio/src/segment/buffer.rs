@@ -3,7 +3,8 @@
 use std::borrow::Cow;
 use std::cmp::min;
 use std::collections::VecDeque;
-use std::fmt;
+use std::{fmt, slice};
+use std::ops::RangeBounds;
 use std::rc::Rc;
 use super::block_deque::BlockDeque;
 
@@ -60,6 +61,19 @@ impl BoxedBuf {
 			b = &mut b[off_b..off_b + len_b];
 		}
 		Some((a, b))
+	}
+
+	pub fn as_slices_in_range<R: RangeBounds<usize>>(&self, range: R) -> (&[u8], &[u8]) {
+		let (mut a, mut b) = self.as_slices();
+		let range = slice::range(range, ..self.len);
+		let mut len = range.len();
+
+		a = &a[range.start..];
+		a = &a[..min(len, a.len())];
+		len -= a.len();
+		b = &b[..len];
+
+		(a, b)
 	}
 
 	pub fn clear(&mut self) {

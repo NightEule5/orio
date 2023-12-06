@@ -88,6 +88,9 @@ pub enum StreamContext {
 	/// Writing to a sink.
 	#[display("writing to sink")]
 	Write,
+	/// Seeking in a stream.
+	#[display("seeking in stream")]
+	Seek,
 	/// Other operation described by a string.
 	#[display(inner)]
 	Other(&'static str),

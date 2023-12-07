@@ -4,51 +4,10 @@
 
 use core::str::utf8_char_width;
 use std::cmp::min;
-use std::mem;
 use std::str::from_utf8_unchecked;
-use all_asserts::{assert_range, debug_assert_lt};
-use simdutf8::compat::{from_utf8, Utf8Error as SimdUtf8Error};
-use crate::{expect, Utf8Error, Utf8ErrorKind};
-
-struct PartialUtf8Decoder<'a, I> {
-	iter: I,
-	buf: [u8; 4],
-	part: &'a [u8],
-}
-
-impl<'a, I: Iterator<Item = &'a [u8]>> Iterator for PartialUtf8Decoder<'a, I> {
-	type Item = Result<Decoded<'a>, Utf8Error>;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		let Some(mut bytes) = self.iter.next() else {
-			return self.take_partial()
-					   .map(|p| Ok(Decoded::Incomplete(p)))
-		};
-
-		if let Some(part) = self.take_partial() {
-			debug_assert!(utf8_char_width(part[0]) > part.len());
-			debug_assert!(part.len() < 4);
-			let rem = utf8_char_width(part[0]) - part.len();
-			self.buf[..part.len()].copy_from_slice(part);
-			self.buf[part.len()..].copy_from_slice(&bytes[..rem]);
-			bytes = &bytes[rem..];
-
-			let Some(char) = char::from_u32(u32::from_be_bytes(self.buf)) else {
-
-			}
-		} else {
-
-		}
-
-		None
-	}
-}
-
-impl<I> PartialUtf8Decoder<'_, I> {
-	fn take_partial(&mut self) -> Option<&[u8]> {
-		Some(mem::take(&mut self.part)).filter(<[u8]>::is_empty)
-	}
-}
+use all_asserts::assert_range;
+use simdutf8::compat::from_utf8;
+use crate::Utf8Error;
 
 #[derive(Default)]
 pub struct PartialChar {
@@ -85,7 +44,6 @@ impl PartialChar {
 		let (current, required) = self.len?;
 		(current == required).then(|| {
 			self.len = None;
-			let mask = !(0xFFFFFFFF << (current * 8));
 			let code = u32::from_be_bytes(self.buf) >> ((4 - current) * 8);
 			char::try_from(code).map_err(|err|
 				Utf8Error::invalid_seq(0, self.buf, current)
@@ -97,6 +55,32 @@ impl PartialChar {
 pub enum Decoded<'a> {
 	Str(&'a str),
 	Char(char)
+}
+
+pub fn read_partial_utf8_into(
+	mut bytes: &[u8],
+	sink: &mut String,
+	part: &mut PartialChar,
+	offset: &mut usize
+) -> Result<usize, Utf8Error> {
+	let last_offset = *offset;
+	while !bytes.is_empty() {
+		*offset += match from_partial_utf8(&mut bytes, part) {
+			Ok(Decoded::Str(str)) => {
+				sink.push_str(str);
+				str.len()
+			}
+			Ok(Decoded::Char(char)) => {
+				sink.push(char);
+				char.len_utf8()
+			}
+			Err(mut err) => {
+				err.valid_up_to += *offset;
+				return Err(err)
+			}
+		};
+	}
+	Ok(*offset - last_offset)
 }
 
 pub fn from_partial_utf8<'a>(bytes: &mut &'a [u8], part: &mut PartialChar) -> Result<Decoded<'a>, Utf8Error> {

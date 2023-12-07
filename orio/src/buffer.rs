@@ -5,23 +5,20 @@ mod write;
 mod options;
 mod partial_utf8;
 
-pub use read::*;
-pub use write::*;
 pub use options::*;
 use partial_utf8::*;
 
 use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
-use std::ops::{RangeBounds};
-use bytes::BufMut;
-use itertools::Itertools;
+use std::ops::RangeBounds;
 use crate::pool::{DefaultPoolContainer, MutPool, Pool, pool};
-use crate::{BufferContext, BufferResult as Result, ByteStr, pool, ResultContext, Seg, StreamContext, StreamResult};
+use crate::{BufferContext, BufferResult as Result, pool, ResultContext, Seg, StreamContext, StreamResult};
 use crate::BufferContext::{Compact, Copy, Read, Reserve};
 use crate::segment::RBuf;
-use crate::streams::{BufSink, BufStream, Seekable, SeekOffset};
-use crate::streams::codec::Encode;
+use crate::streams::{BufSink, BufStream, Seekable, SeekOffset, Stream};
+
+// Todo: track how much space is reserved to keep empty segments after resize-on-read.
 
 /// A dynamically-resizing byte buffer which borrows and returns pool memory as
 /// needed.
@@ -67,18 +64,18 @@ impl<const N: usize> Buffer<'_, N> {
 	/// Creates a new "lean" buffer. See [`BufferOptions::lean`] for details.
 	pub fn lean() -> Self { BufferOptions::lean().into() }
 	
-	/// Creates a new buffer with `value`. Shorthand for:
+	/// Creates a new buffer with `value` in big-endian order. Shorthand for:
 	///
 	/// ```no_run
 	/// use orio::Buffer;
 	/// use orio::streams::BufSink;
 	///
 	/// let mut buf = Buffer::default();
-	/// buf.write_from(value)?;
+	/// buf.write_int(value)?;
 	/// ```
-	pub fn from_encode(value: impl Encode) -> Result<Self> {
+	pub fn from_int<T: num_traits::PrimInt + bytemuck::Pod>(value: T) -> Result<Self> {
 		let mut buf = Self::default();
-		buf.write_from(value)?;
+		buf.write_int(value)?;
 		Ok(buf)
 	}
 	
@@ -89,11 +86,11 @@ impl<const N: usize> Buffer<'_, N> {
 	/// use orio::streams::BufSink;
 	///
 	/// let mut buf = Buffer::default();
-	/// buf.write_from_le(value)?;
+	/// buf.write_pod(value.to_le())?;
 	/// ```
-	pub fn from_encode_le(value: impl Encode) -> Result<Self> {
+	pub fn from_int_le<T: num_traits::PrimInt + bytemuck::Pod>(value: T) -> Result<Self> {
 		let mut buf = Self::default();
-		buf.write_from_le(value)?;
+		buf.write_int_le(value)?;
 		Ok(buf)
 	}
 
@@ -157,10 +154,14 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 
 	/// Clears data from the buffer.
 	pub fn clear(&mut self) -> Result {
-		let Self { pool, data, .. } = self;
-		let segments = data.drain(data.len())
-						   .update(Seg::clear);
-		pool.collect(segments)
+		for seg in self.data.iter_mut() {
+			seg.clear();
+		}
+		// Take the internal ring buffer instead of draining. This should be
+		// significantly faster.
+		let segments = self.take_buf();
+		self.pool
+			.collect(segments)
 			.context(BufferContext::Clear)
 	}
 
@@ -450,11 +451,18 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 	}
 
 	/// Clears and closed the buffer.
-	pub fn close(&mut self) -> Result { self.clear() }
+	pub fn close(&mut self) -> StreamResult { Ok(self.clear()?) }
+}
 
+impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	/// Swaps internal buffers.
-	pub(crate) fn swap(&mut self, Buffer { data, .. }: &mut Buffer<N, impl Pool<N>>) {
+	pub(crate) fn swap(&mut self, Buffer { data, .. }: &mut Buffer<'d, N, impl Pool<N>>) {
 		mem::swap(&mut self.data, data);
+	}
+
+	/// Takes the internal buffer, leaving a new one in its place.
+	fn take_buf(&mut self) -> RBuf<Seg<'d, N>> {
+		mem::take(&mut self.data)
 	}
 }
 
@@ -462,6 +470,20 @@ impl<const N: usize, P: Pool<N>> Drop for Buffer<'_, N, P> {
 	fn drop(&mut self) {
 		let _ = self.close();
 	}
+}
+
+impl<const N: usize, P: Pool<N>> Stream for Buffer<'_, N, P> {
+	fn close(&mut self) -> StreamResult {
+		self.clear()?;
+		Ok(())
+	}
+}
+
+impl<const N: usize, P: Pool<N>> BufStream<N> for Buffer<'_, N, P> {
+	type Pool = P;
+
+	fn buf(&self) -> &Self { self }
+	fn buf_mut(&mut self) -> &mut Self { self }
 }
 
 impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {
@@ -490,11 +512,4 @@ impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {
 
 	/// Returns `0`.
 	fn seek_pos(&mut self) -> StreamResult<usize> { Ok(0) }
-}
-
-impl<const N: usize, P: Pool<N>> BufStream<N> for Buffer<N, P> {
-	type Pool = P;
-
-	fn buf(&self) -> &Self { self }
-	fn buf_mut(&mut self) -> &mut Self { self }
 }

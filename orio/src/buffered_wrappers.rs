@@ -1,102 +1,108 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Buffer, BufferOptions, Error, Result, SourceError::Eos};
-use crate::Context::{BufFlush, BufRead, BufWrite, StreamSeek};
-use crate::error::ResultExt;
-use crate::pool::{DefaultPool, SharedPool};
-use crate::streams::{Sink, Source, BufStream, BufSource, BufSink, Seekable, SeekOffset, SeekableExt};
-use crate::segment::SIZE;
+use crate::{Buffer, BufferError, BufferOptions, BufferResult, ResultContext, StreamError, StreamResult};
+use crate::BufferContext::{Drain, Fill};
+use crate::streams::{Sink, Source, BufStream, BufSource, BufSink, Seekable, SeekOffset, SeekableExt, Stream};
+use crate::StreamContext::{Flush, Read, Seek, Write};
 
-pub fn buffer_source<S: Source>(source: S, options: BufferOptions) -> BufferedSource<S> {
+pub fn buffer_source<'d, S: Source>(source: S, options: BufferOptions) -> BufferedSource<'d, S> {
 	BufferedSource::new(source, options)
 }
 
-pub fn buffer_sink<S: Sink>(sink: S) -> BufferedSink<S> {
-	BufferedSink {
-		buffer: Buffer::default(),
-		sink,
-		closed: false,
-	}
+pub fn buffer_sink<'d, S: Sink>(sink: S, options: BufferOptions) -> BufferedSink<'d, S> {
+	BufferedSink::new(sink, options)
 }
 
-pub struct BufferedSource<S: Source> {
-	buffer: Buffer,
+pub struct BufferedSource<'d, S: Source> {
+	buffer: Buffer<'d>,
 	source: S,
 	closed: bool,
 }
 
-impl<S: Source> BufferedSource<S> {
+impl<S: Source> BufferedSource<'_, S> {
 	fn new(source: S, options: BufferOptions) -> Self {
 		Self {
-			buffer: Buffer::new_options(DefaultPool::get(), options),
+			buffer: options.into(),
 			source,
 			closed: false,
 		}
 	}
 }
 
-impl<S: Source> BufferedSource<S> {
-	/// Fills the buffer, rounding up to the nearest segment size.
-	fn fill_buf(&mut self, mut byte_count: usize) -> Result<bool> {
-		let count = self.buffer.count();
-		byte_count = (count + byte_count).next_multiple_of(SIZE) - count;
-
-		let cnt = self.source
-					  .read(&mut self.buffer, byte_count)
-					  .context(BufRead);
-		match cnt {
-			Ok(cnt)                        => Ok(cnt > 0),
-			Err(Error { source: Eos, .. }) => Ok(false),
-			Err(error)                     => Err(error)
-		}
-	}
-}
-
-impl<S: Source> Source for BufferedSource<S> {
-	fn read(&mut self, buffer: &mut Buffer<impl SharedPool>, byte_count: usize) -> Result<usize> {
-		if self.closed { return Err(Error::closed(BufRead)) }
-
-		self.request(byte_count)?;
-		self.buffer.read(buffer, byte_count)
-	}
-
-	fn close_source(&mut self) -> Result {
+impl<S: Source> Stream for BufferedSource<'_, S> {
+	fn close(&mut self) -> StreamResult {
 		if !self.closed {
 			self.closed = true;
-			let buf_close = self.buffer.close();
-			let src_close = self.source.close_source();
-			buf_close?;
-			src_close
-		} else {
-			Ok(())
+			let buf_result = self.buffer.close();
+			let src_result = self.source.close();
+			buf_result?;
+			src_result?;
 		}
+		Ok(())
 	}
 }
 
-impl<S: Source> BufStream for BufferedSource<S> {
+impl<S: Source> Source for BufferedSource<'_, S> {
+	fn is_eos(&self) -> bool {
+		self.source.is_eos()
+	}
+
+	fn fill(&mut self, sink: &mut Buffer<'_>, mut count: usize) -> BufferResult<usize> {
+		if self.closed { return Err(BufferError::closed(Fill)) }
+		let mut read = self.buffer.fill(sink, count)?;
+		count -= read;
+		read += self.source.fill(sink, count)?;
+		Ok(read)
+	}
+
+	fn fill_all(&mut self, sink: &mut Buffer<'_>) -> BufferResult<usize> {
+		if self.closed { return Err(BufferError::closed(Fill)) }
+		let mut count = self.buffer.fill_all(sink)?;
+		count +=  self.source.fill_all(sink)?;
+		Ok(count)
+	}
+}
+
+impl<'d, S: Source> BufStream for BufferedSource<'d, S> {
+	type Pool = <Buffer<'d> as BufStream>::Pool;
+
 	fn buf(&self) -> &Buffer { &self.buffer }
 	fn buf_mut(&mut self) -> &mut Buffer { &mut self.buffer }
 }
 
-impl<S: Source> BufSource for BufferedSource<S> {
-	fn request(&mut self, byte_count: usize) -> Result<bool> {
-		if self.closed { return Ok(false) }
+impl<S: Source> BufSource for BufferedSource<'_, S> {
+	fn request(&mut self, count: usize) -> usize {
+		if self.closed || self.is_eos() { return 0 }
 
-		if self.buffer.request(byte_count)? {
-			return Ok(true)
+		let available = self.buffer.request(count);
+		if available >= count {
+			return available
 		}
 
-		self.fill_buf(byte_count)
+		self.source
+			.fill(self.buf_mut(), count.min(self.buffer.limit()))
+			.unwrap_or_default()
 	}
 
-	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize> {
-		sink.write_all(self.buf_mut())
-			.context(BufRead)
+	fn read(&mut self, sink: &mut impl Sink, mut count: usize) -> StreamResult<usize> {
+		if self.closed { return Err(StreamError::closed(Read)) }
+
+		let mut read = sink.drain(self.buf_mut(), count).context(Read)?;
+		count -= read;
+		read += self.source.read(sink)?;
+		Ok(read)
+	}
+
+	fn read_all(&mut self, sink: &mut impl Sink) -> StreamResult<usize> {
+		if self.closed { return Err(StreamError::closed(Read)) }
+		let mut read = sink.drain_all(self.buf_mut()).context(Read)?;
+		read += self.source.read_all(sink)?;
+		Ok(read)
 	}
 }
 
-impl<S: Source + Seekable> BufferedSource<S> {
-	fn seek_back(&mut self, off: usize) -> Result<usize> {
+impl<S: Source + Seekable> BufferedSource<'_, S> {
+	fn seek_back(&mut self, off: usize) -> StreamResult<usize> {
 		let cur_pos = self.seek_pos()?;
 		let new_pos = self.source.seek_back(off)?;
 		let count = cur_pos - new_pos;
@@ -105,24 +111,26 @@ impl<S: Source + Seekable> BufferedSource<S> {
 			return Ok(new_pos)
 		}
 
-		let mut seek_buf = Buffer::lean();
+		let mut seek_buf: Buffer = BufferOptions::default()
+			.set_compact_threshold(usize::MAX)
+			.into();
 		self.source
 			.read(&mut seek_buf, count)
-			.context(StreamSeek)?;
-		self.buffer
-			.prefix_with(&mut seek_buf)
-			.context(StreamSeek)?;
+			.context(Seek)?;
+		seek_buf.drain_all(&mut self.buffer)
+				.context(Seek)?;
+		self.buffer.swap(&mut seek_buf);
 		Ok(new_pos)
 	}
 
-	fn seek_forward(&mut self, mut off: usize) -> Result<usize> {
+	fn seek_forward(&mut self, mut off: usize) -> StreamResult<usize> {
 		off -= self.buffer.skip(off)?;
 		self.source.seek_forward(off)
 	}
 }
 
-impl<S: Source + Seekable> Seekable for BufferedSource<S> {
-	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
+impl<S: Source + Seekable> Seekable for BufferedSource<'_, S> {
+	fn seek(&mut self, offset: SeekOffset) -> StreamResult<usize> {
 		return match offset {
 			SeekOffset::Forward(0) |
 			SeekOffset::Back   (0) => self.seek_pos(),
@@ -150,56 +158,43 @@ impl<S: Source + Seekable> Seekable for BufferedSource<S> {
 		}
 	}
 
-	fn seek_len(&mut self) -> Result<usize> { self.source.seek_len() }
+	fn seek_len(&mut self) -> StreamResult<usize> { self.source.seek_len() }
 
-	fn seek_pos(&mut self) -> Result<usize> {
+	fn seek_pos(&mut self) -> StreamResult<usize> {
 		// Offset the source position back by the buffer length to account for
 		// buffering.
 		Ok(self.source.seek_pos()? - self.buffer.count())
 	}
 }
 
-impl<S: Source> Drop for BufferedSource<S> {
+impl<S: Source> Drop for BufferedSource<'_, S> {
 	fn drop(&mut self) {
-		let _ = self.close_source();
+		let _ = self.close();
 	}
 }
 
-pub struct BufferedSink<S: Sink> {
-	buffer: Buffer,
+pub struct BufferedSink<'d, S: Sink> {
+	buffer: Buffer<'d>,
 	sink: S,
 	closed: bool,
 }
 
-impl<S: Sink> Sink for BufferedSink<S> {
-	fn write(&mut self, buffer: &mut Buffer<impl SharedPool>, byte_count: usize) -> Result<usize> {
-		let cnt = self.buffer.write(buffer, byte_count)?;
-		self.flush()?;
-		Ok(cnt)
-	}
-
-	fn flush(&mut self) -> Result {
-		if !self.closed {
-			// Both of these need a chance to run before returning an error.
-			let read = self.sink
-						   .write_all(&mut self.buffer)
-						   .context(BufFlush);
-			let flush = self.sink
-							.flush()
-							.context(BufFlush);
-			read?;
-			flush?;
-			Ok(())
-		} else {
-			return Err(Error::closed(BufFlush))
+impl<S: Sink> BufferedSink<'_, S> {
+	fn new(sink: S, options: BufferOptions) -> Self {
+		Self {
+			buffer: options.into(),
+			sink,
+			closed: false,
 		}
 	}
+}
 
-	fn close_sink(&mut self) -> Result {
+impl<S: Sink> Stream for BufferedSink<'_, S> {
+	fn close(&mut self) -> StreamResult {
 		if !self.closed {
 			self.closed = true;
 			let flush = self.flush();
-			let close = self.sink.close_sink();
+			let close = self.sink.close();
 			let clear = self.buffer.close();
 			flush?;
 			close?;
@@ -210,32 +205,68 @@ impl<S: Sink> Sink for BufferedSink<S> {
 	}
 }
 
-impl<S: Sink> BufStream for BufferedSink<S> {
+impl<S: Sink> Sink for BufferedSink<'_, S> {
+	fn drain(&mut self, source: &mut Buffer<'_>, count: usize) -> BufferResult<usize> {
+		if self.closed { return Err(BufferError::closed(Drain)) }
+		self.flush().context(Drain)?;
+		self.sink.drain(source, count)
+	}
+
+	fn drain_all(&mut self, source: &mut Buffer<'_>) -> BufferResult<usize> {
+		if self.closed { return Err(BufferError::closed(Drain)) }
+		self.flush().context(Drain)?;
+		self.sink.drain_all(source)
+	}
+
+	fn flush(&mut self) -> StreamResult {
+		if self.closed { return Err(StreamError::closed(Flush)) }
+		// Both of these need a chance to run before returning an error.
+		let read = self.sink.drain_all(self.buf_mut());
+		let flush = self.sink.flush();
+		read?;
+		flush
+	}
+}
+
+impl<'d, S: Sink> BufStream for BufferedSink<'d, S> {
+	type Pool = <Buffer<'d> as BufStream>::Pool;
+
 	fn buf(&self) -> &Buffer { &self.buffer }
 	fn buf_mut(&mut self) -> &mut Buffer { &mut self.buffer }
 }
 
-impl<S: Sink> BufSink for BufferedSink<S> {
-	fn write_all(&mut self, source: &mut impl Source) -> Result<usize> {
-		source.read_all(self.buf_mut())
-			  .context(BufWrite)
+impl<S: Sink> BufSink<'_> for BufferedSink<'_, S> {
+	fn write(&mut self, source: &mut impl Source, mut count: usize) -> StreamResult<usize> {
+		if self.closed { return Err(StreamError::closed(Write)) }
+
+		let mut written = source.fill(self.buf_mut(), count).context(Write)?;
+		count -= written;
+		written += self.sink.write(source)?;
+		Ok(written)
+	}
+
+	fn write_all(&mut self, source: &mut impl Source) -> StreamResult<usize> {
+		if self.closed { return Err(StreamError::closed(Write)) }
+		let mut written = source.fill_all(self.buf_mut()).context(Write)?;
+		written += self.sink.write_all(source)?;
+		Ok(written)
 	}
 }
 
-impl<S: Sink + Seekable> Seekable for BufferedSink<S> {
-	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
+impl<S: Sink + Seekable> Seekable for BufferedSink<'_, S> {
+	fn seek(&mut self, offset: SeekOffset) -> StreamResult<usize> {
 		// Todo: Is there some less naive approach than flushing then seeking?
-		self.flush().context(StreamSeek)?;
+		self.flush().context(Seek)?;
 		self.sink.seek(offset)
 	}
 
-	fn seek_len(&mut self) -> Result<usize> {
+	fn seek_len(&mut self) -> StreamResult<usize> {
 		Ok(self.buffer.count() + self.sink.seek_len()?)
 	}
 }
 
-impl<S: Sink> Drop for BufferedSink<S> {
+impl<S: Sink> Drop for BufferedSink<'_, S> {
 	fn drop(&mut self) {
-		let _ = self.close_sink();
+		let _ = self.close();
 	}
 }

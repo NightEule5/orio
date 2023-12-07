@@ -32,8 +32,8 @@ pub struct Error<C: sealed::Context> {
 	#[from(PoolError)]
 	#[from(StreamError)]
 	#[from(BufferError)]
-	source: ErrorSource,
-	context: C
+	pub(crate) source: ErrorSource,
+	pub(crate) context: C
 }
 
 /// Context of what a buffer was doing when the error occurred.
@@ -88,6 +88,9 @@ pub enum StreamContext {
 	/// Writing to a sink.
 	#[display("writing to sink")]
 	Write,
+	/// Flushing to a sink.
+	#[display("flushing to sink")]
+	Flush,
 	/// Seeking in a stream.
 	#[display("seeking in stream")]
 	Seek,
@@ -136,6 +139,13 @@ impl<C: sealed::Context> error::Error for Error<C> {
 }
 
 impl<C: sealed::Context> Error<C> {
+	pub fn closed(context: C) -> Self {
+		Self {
+			source: ErrorSource::Closed(StreamClosed),
+			context,
+		}
+	}
+
 	/// Gets the error context.
 	pub fn context(&self) -> C {
 		self.context

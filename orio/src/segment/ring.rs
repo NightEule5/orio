@@ -54,10 +54,11 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 	/// Pushes `seg` to the front of the buffer.
 	pub fn push_front(&mut self, seg: Seg<'a, N>) {
-		self.size += seg.size();
 		if self.is_empty() {
-			self.limit += seg.limit();
+			self.push_empty(seg);
+			return;
 		}
+		self.size += seg.size();
 		self.len += 1;
 		self.count += seg.len();
 		self.buf.push_front(seg);
@@ -99,7 +100,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Pops a writable segment from the back of the buffer.
 	pub fn pop_back(&mut self) -> Option<Seg<'_, N>> {
 		let index = self.back_index();
-		if self.is_empty() || self.buf[index].is_full() {
+		if self.is_empty() || self.buf[index].is_full() || self.buf[index].is_shared() {
 			return self.pop_empty()
 		}
 
@@ -231,7 +232,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	fn back_index(&self) -> usize { self.len - 1 }
 
-	fn back_limit(&self) -> usize {
+	pub(crate) fn back_limit(&self) -> usize {
 		if self.is_empty() {
 			0
 		} else {
@@ -313,6 +314,15 @@ impl<'a, const N: usize> Extend<Seg<'a, N>> for RBuf<Seg<'a, N>> {
 
 	fn extend_reserve(&mut self, additional: usize) {
 		self.buf.reserve(additional);
+	}
+}
+
+impl<T> IntoIterator for RBuf<T> {
+	type Item = T;
+	type IntoIter = <VecDeque<T> as IntoIterator>::IntoIter;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.buf.into_iter()
 	}
 }
 

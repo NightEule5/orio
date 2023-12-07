@@ -40,9 +40,11 @@
 	generic_const_exprs,
 	int_roundings,
 	new_uninit,
+	pattern,
 	seek_stream_len,
 	slice_range,
 	specialization,
+	str_internals,
 	thread_local,
 	try_blocks,
 	type_alias_impl_trait,
@@ -56,11 +58,7 @@ mod segment;
 mod element;
 pub mod pool;
 mod util;
-mod byte_str;
-mod std_io;
 
 pub use error::*;
 pub use buffer::*;
 pub use segment::*;
-pub use byte_str::*;
-pub use std_io::*;

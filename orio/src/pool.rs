@@ -9,7 +9,6 @@ use std::rc::Rc;
 use std::result;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use crate::new::alloc_block;
 use crate::segment::alloc_block;
 use super::segment::{Seg, SIZE};
 

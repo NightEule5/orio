@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Buffer, Result};
-use crate::pool::SharedPool;
-use super::{Sink, Source};
+use crate::{Buffer, BufferResult as Result, ResultContext};
+use crate::BufferContext::Drain;
+use crate::pool::Pool;
+use super::{Sink, Source, Stream};
 
 /// Returns a [`Sink`] that writes to nowhere, dropping any data written to it.
 pub fn void_sink() -> VoidSink { VoidSink }
@@ -14,15 +15,23 @@ pub fn void_source() -> VoidSource { VoidSource }
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VoidSink;
 
-impl Sink for VoidSink {
+impl Stream for VoidSink { }
+
+impl<const N: usize> Sink<N> for VoidSink {
 	/// Skips `count` bytes at `source`.
-	fn write(&mut self, source: &mut Buffer<impl SharedPool>, count: usize) -> Result<usize> {
-		source.skip(count)
+	fn drain(&mut self, source: &mut Buffer<'_, N, impl Pool<N>>, count: usize) -> Result<usize> {
+		if count < source.count() {
+			source.skip(count).context(Drain)
+		} else {
+			self.drain_all(source)
+		}
 	}
 
 	/// Skips all bytes at `source`.
-	fn write_all(&mut self, source: &mut Buffer<impl SharedPool>) -> Result<usize> {
-		source.skip_all()
+	fn drain_all(&mut self, source: &mut Buffer<'_, N, impl Pool<N>>) -> Result<usize> {
+		let count = source.count();
+		source.clear().context(Drain)?;
+		Ok(count)
 	}
 }
 
@@ -30,14 +39,16 @@ impl Sink for VoidSink {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VoidSource;
 
-impl Source for VoidSource {
-	/// Reads nothing, returning `0`.
-	fn read(&mut self, _sink: &mut Buffer<impl SharedPool>, _count: usize) -> Result<usize> {
+impl Stream for VoidSource { }
+
+impl<const N: usize> Source<N> for VoidSource {
+	/// Reads nothing.
+	fn fill(&mut self, _: &mut Buffer<'_, N, impl Pool<N>>, _: usize) -> Result<usize> {
 		Ok(0)
 	}
 
-	/// Reads nothing, returning `0`.
-	fn read_all(&mut self, _: &mut Buffer<impl SharedPool>) -> Result<usize> {
+	/// Reads nothing.
+	fn fill_all(&mut self, _: &mut Buffer<'_, N, impl Pool<N>>) -> Result<usize> {
 		Ok(0)
 	}
 }

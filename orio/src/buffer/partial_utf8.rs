@@ -71,14 +71,12 @@ impl PartialChar {
 		let (current, required) = self.len?;
 		(current == required).then(|| {
 			self.len = None;
-			let code = u32::from_be_bytes(self.buf) >> ((4 - current) * 8);
-			char::try_from(code).map_err(|err|
-				Utf8Error::invalid_seq(0, self.buf, current)
-			)
+			Ok(from_utf8(&self.buf[..current])?.chars().next().unwrap())
 		})
 	}
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub enum Decoded<'a> {
 	Str(&'a str),
 	Char(char)
@@ -117,11 +115,15 @@ pub fn from_partial_utf8<'a>(bytes: &mut &'a [u8], part: &mut PartialChar) -> Re
 	}
 
 	match from_utf8(bytes).map_err(Into::<Utf8Error>::into) {
-		Ok(str) => Ok(Decoded::Str(str)),
+		Ok(str) => {
+			*bytes = &bytes[str.len()..];
+			Ok(Decoded::Str(str))
+		}
 		Err(err) if err.kind.is_invalid_sequence() => Err(err),
 		Err(err) => {
 			let (valid, incomplete) = bytes.split_at(err.valid_up_to);
 			part.push(incomplete);
+			*bytes = &[];
 
 			debug_assert!(
 				from_utf8(valid).is_ok(),
@@ -143,11 +145,11 @@ mod test {
 
 	#[test]
 	fn normal() {
-		assert!(
-			matches!(
-				from_partial_utf8(&mut &b"Hello World!"[..], &mut PartialChar::default()),
-				Ok(Decoded::Str("Hello World!"))
-			)
+		let ref mut partial_char = PartialChar::default();
+		assert_eq!(
+			from_partial_utf8(&mut &b"Hello World!"[..], partial_char)
+				.unwrap(),
+			Decoded::Str("Hello World!")
 		);
 	}
 
@@ -157,20 +159,17 @@ mod test {
 		let (mut a, mut b) = "Hello—World!".as_bytes().split_at(6);
 
 		let ref mut partial_char = PartialChar::default();
-		assert!(
-			matches!(
-				from_partial_utf8(&mut a, partial_char), Ok(Decoded::Str("Hello"))
-			)
+		assert_eq!(
+			from_partial_utf8(&mut a, partial_char).unwrap(),
+			Decoded::Str("Hello")
 		);
-		assert!(
-			matches!(
-				from_partial_utf8(&mut b, partial_char), Ok(Decoded::Char('—'))
-			)
+		assert_eq!(
+			from_partial_utf8(&mut b, partial_char).unwrap(),
+			Decoded::Char('—')
 		);
-		assert!(
-			matches!(
-				from_partial_utf8(&mut b, partial_char), Ok(Decoded::Str("World!"))
-			)
+		assert_eq!(
+			from_partial_utf8(&mut b, partial_char).unwrap(),
+			Decoded::Str("World!")
 		);
 	}
 }

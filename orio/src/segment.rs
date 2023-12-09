@@ -317,10 +317,7 @@ mod test {
 		let len = SLICE.len();
 		let mut seg: Seg = Seg::default();
 		assert_eq!(seg.write(SLICE), Some(len), "should write {len} bytes");
-		assert_eq!(seg.off, 0, "off == 0");
-		assert_eq!(seg.len, len, "len == {len}");
-		assert_eq!(seg.as_slice(), SLICE, "contained bytes should match written bytes");
-		assert_eq!(seg.off, 0, "off == 0");
-		assert_eq!(seg.len, len, "len == {len}");
+		assert_eq!(seg.len(), len, "len == {len}");
+		assert_eq!(seg.as_slices(), (SLICE, &[][..]), "contained bytes should match written bytes");
 	}
 }

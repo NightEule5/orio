@@ -44,7 +44,6 @@
 	seek_stream_len,
 	slice_range,
 	specialization,
-	str_internals,
 	thread_local,
 	try_blocks,
 	type_alias_impl_trait,

@@ -2,12 +2,39 @@
 
 //! Util for decoding UTF-8 strings spread across multiple byte slices.
 
-use core::str::utf8_char_width;
 use std::cmp::min;
 use std::str::from_utf8_unchecked;
 use all_asserts::assert_range;
 use simdutf8::compat::from_utf8;
 use crate::Utf8Error;
+
+// Char width copied from std
+
+// https://tools.ietf.org/html/rfc3629
+const UTF8_CHAR_WIDTH: &[u8; 256] = &[
+	// 1  2  3  4  5  6  7  8  9  A  B  C  D  E  F
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 0
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 1
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 2
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 3
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 4
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 5
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 6
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // 7
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 8
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 9
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // A
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // B
+	0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // C
+	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // D
+	3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, // E
+	4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // F
+];
+
+#[inline]
+const fn utf8_char_width(b: u8) -> usize {
+	UTF8_CHAR_WIDTH[b as usize] as usize
+}
 
 #[derive(Default)]
 pub struct PartialChar {
@@ -89,7 +116,7 @@ pub fn from_partial_utf8<'a>(bytes: &mut &'a [u8], part: &mut PartialChar) -> Re
 		return char.map(Decoded::Char)
 	}
 
-	match from_utf8(bytes).map_err(Into::into) {
+	match from_utf8(bytes).map_err(Into::<Utf8Error>::into) {
 		Ok(str) => Ok(Decoded::Str(str)),
 		Err(err) if err.kind.is_invalid_sequence() => Err(err),
 		Err(err) => {

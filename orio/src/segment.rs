@@ -105,7 +105,10 @@ impl<'d, const N: usize> Seg<'d, N> {
 		match &self.0 {
 			Buf::Block(block) => block.as_slices_in_range(range),
 			Buf::Boxed(boxed) => boxed.as_slices_in_range(range),
-			Buf::Slice(slice) => (&slice[range], &[]),
+			Buf::Slice(slice) => {
+				let range = slice::range(range, ..slice.len());
+				(&slice[range], &[])
+			}
 		}
 	}
 
@@ -219,7 +222,7 @@ impl<'d, const N: usize> Seg<'d, N> {
 	}
 
 	/// Shares the segment's contents within `range`.
-	pub fn share<R: RangeBounds<usize>>(&self, range: R) -> Self {
+	pub fn share<R: RangeBounds<usize>>(&self, range: R) -> Seg<'d, N> {
 		let range = slice::range(range, ..self.len());
 		let mut seg = self.clone();
 		seg. consume_unchecked(range.start);
@@ -228,7 +231,7 @@ impl<'d, const N: usize> Seg<'d, N> {
 	}
 
 	/// Shares the segment's contents.
-	pub fn share_all(&self) -> Self { self.clone() }
+	pub fn share_all(&self) -> Seg<'d, N> { self.clone() }
 
 	/// Consumes the segment and returns its inner block of memory, if any. This is
 	/// intended for use by pool implementations to collect only blocks and discard

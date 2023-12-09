@@ -82,7 +82,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	}
 
 	/// Pops a readable segment from the front of the buffer.
-	pub fn pop_front(&mut self) -> Option<Seg<'_, N>> {
+	pub fn pop_front(&mut self) -> Option<Seg<'a, N>> {
 		if !self.is_empty() {
 			let seg = self.buf.pop_front()?;
 			self.count -= seg.len();
@@ -98,7 +98,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	}
 
 	/// Pops a writable segment from the back of the buffer.
-	pub fn pop_back(&mut self) -> Option<Seg<'_, N>> {
+	pub fn pop_back(&mut self) -> Option<Seg<'a, N>> {
 		let index = self.back_index();
 		if self.is_empty() || self.buf[index].is_full() || self.buf[index].is_shared() {
 			return self.pop_empty()
@@ -129,7 +129,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	pub fn invalidate(&mut self) {
 		let mut last_limit = None;
 
-		for seg in self.buf {
+		for seg in &self.buf {
 			self.size += seg.size();
 
 			if seg.is_empty() {
@@ -147,12 +147,12 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	}
 
 	/// Returns a cursor for reading segments.
-	pub fn read(&mut self, pool: &mut impl Pool<N>) -> Option<ReadCursor<'a, '_, N, impl Pool<N>>> {
-		(!self.is_empty()).then(|| ReadCursor::new(self, pool))
+	pub fn read(&'a mut self, pool: &'a mut impl Pool<N>) -> Option<ReadCursor<'a, '_, N, impl Pool<N>>> {
+		(!self.is_empty()).then(move || ReadCursor::new(self, pool))
 	}
 
 	/// Drains up to `count` segments from the buffer.
-	pub fn drain(&mut self, count: usize) -> impl Iterator<Item = Seg<'_, N>> + '_ {
+	pub fn drain(&mut self, count: usize) -> impl Iterator<Item = Seg<'a, N>> + '_ {
 		// Drain all segments
 		if count >= self.capacity() {
 			self.len = 0;
@@ -210,7 +210,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	}
 
 	/// Iterates over written segments.
-	pub fn iter(&self) -> impl Iterator<Item = &Seg<'_, N>> + '_ {
+	pub fn iter(&self) -> impl Iterator<Item = &Seg<'a, N>> + '_ {
 		self.buf.iter().take(self.len)
 	}
 

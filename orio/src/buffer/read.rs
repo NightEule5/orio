@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::str::pattern::Pattern;
-use crate::{Buffer, StreamResult as Result, ResultContext, BufferResult};
+use crate::{Buffer, StreamResult as Result, ResultContext, BufferResult, StreamResult};
 use super::partial_utf8::*;
 use crate::BufferContext::Fill;
 use crate::pool::Pool;
-use crate::streams::{BufSource, Sink, Source, Utf8Match};
+use crate::streams::{BufSource, Source, Utf8Match};
 use crate::StreamContext::Read;
 
-impl<const N: usize, P: Pool<N>> Source<N> for Buffer<'_, N, P> {
+impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 	fn is_eos(&self) -> bool {
 		self.is_empty()
 	}
 
-	fn fill(&mut self, sink: &mut Buffer<'_, N, impl Pool<N>>, mut count: usize) -> BufferResult<usize> {
+	fn fill(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>, mut count: usize) -> BufferResult<usize> {
 		if count == 0 { return Ok(0) }
 
 		// Use faster fill_all.
@@ -63,7 +63,7 @@ impl<const N: usize, P: Pool<N>> Source<N> for Buffer<'_, N, P> {
 		Ok(count)
 	}
 
-	fn fill_all(&mut self, sink: &mut Buffer<'_, N, impl Pool<N>>) -> BufferResult<usize> {
+	fn fill_all(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
 		self.resize().context(Fill)?;
 		let read = self.count();
 		// Take the internal ring buffer instead of draining, which should be
@@ -73,9 +73,9 @@ impl<const N: usize, P: Pool<N>> Source<N> for Buffer<'_, N, P> {
 	}
 }
 
-impl<const N: usize, P: Pool<N>> BufSource<N> for Buffer<'_, N, P> {
-	fn request(&mut self, _: usize) -> usize {
-		self.count()
+impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
+	fn request(&mut self, count: usize) -> StreamResult<bool> {
+		Ok(self.count() >= count)
 	}
 
 	fn read_slice(&mut self, mut buf: &mut [u8]) -> Result<usize> {

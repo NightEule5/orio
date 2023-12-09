@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::error::Error as StdError;
-use std::{fmt, result};
-use std::cmp::min;
+use std::marker::PhantomData;
+use std::result;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
-use bytes::BufMut;
 use num_traits::PrimInt;
 use crate::pool::Pool;
 
@@ -29,10 +27,10 @@ pub struct EndOfStream {
 }
 
 impl EndOfStream {
-	fn format_req(&self) -> fmt::Arguments<'_> {
+	fn format_req(&self) -> String {
 		self.required_count.map_or_else(
 			Default::default,
-			|n| format_args!("(required {n} bytes)")
+			|n| format!("(required {n} bytes)")
 		)
 	}
 }
@@ -54,28 +52,29 @@ impl StreamError {
 
 pub type Result<T = (), E = StreamError> = result::Result<T, E>;
 
-pub trait Stream {
-	/// Closes the stream if not already closed. Closing is idempotent; streams
-	/// that have already been closed must return `Ok` on subsequent calls.
-	/// [`Buffer`] is the sole exception to the close-idempotence rule.
+pub trait Stream<const N: usize> {
+	/// Closes the stream if not already closed. For [`Sink`]s, this should flush
+	/// buffered bytes to the sink. Closing must be idempotent; streams that have
+	/// already been closed must return `Ok` on subsequent calls. [`Buffer`] is
+	/// the sole exception to the close-idempotence rule.
 	///
 	/// All default streams close automatically when dropped.
 	fn close(&mut self) -> Result {
-		// Hack to  workaround "conflicting implementation" when specializing to
+		// Hack to workaround "conflicting implementation" when specializing to
 		// call flush on sinks.
-		trait CloseSpec<const N: usize> {
+		trait CloseSpec<const N: usize, S: Stream<N> + ?Sized> {
 			fn close_spec(&mut self) -> Result;
 		}
 
-		impl<const N: usize, S: Sink<N>> CloseSpec<N> for S {
-			fn close_spec(&mut self) -> Result {
-				self.flush()
+		impl<const N: usize, S: Stream<N> + ?Sized> CloseSpec<N, S> for S {
+			default fn close_spec(&mut self) -> Result {
+				Ok(())
 			}
 		}
 
-		impl<const N: usize, S: Stream> CloseSpec<N> for S {
-			default fn close_spec(&mut self) -> Result {
-				Ok(())
+		impl<'d, const N: usize, S: Sink<'d, N> + ?Sized> CloseSpec<N, S> for S {
+			fn close_spec(&mut self) -> Result {
+				self.flush()
 			}
 		}
 
@@ -83,7 +82,7 @@ pub trait Stream {
 	}
 }
 
-pub trait Source<const N: usize = SIZE>: Stream {
+pub trait Source<'d, const N: usize = SIZE>: Stream<N> {
 	/// Returns `true` if end-of-stream was reached. The end-of-stream state must
 	/// be *terminal*; once this method returns `true` it must always return `true`.
 	/// [`Buffer`] is the sole exception to the terminality rule.
@@ -92,32 +91,32 @@ pub trait Source<const N: usize = SIZE>: Stream {
 	/// number of bytes read.
 	fn fill(
 		&mut self,
-		sink: &mut Buffer<'_, N, impl Pool<N>>,
+		sink: &mut Buffer<'d, N, impl Pool<N>>,
 		count: usize
 	) -> BufferResult<usize>;
 	/// Fills a buffer with all available data read from the source, returning the
 	/// number of bytes read.
 	fn fill_all(
 		&mut self,
-		sink: &mut Buffer<'_, N, impl Pool<N>>
+		sink: &mut Buffer<'d, N, impl Pool<N>>
 	) -> BufferResult<usize> {
 		self.fill(sink, usize::MAX)
 	}
 }
 
-pub trait Sink<const N: usize = SIZE>: Stream {
+pub trait Sink<'d, const N: usize = SIZE>: Stream<N> {
 	/// Drains a buffer by writing up to `count` bytes into the sink, returning the
 	/// number of bytes read.
 	fn drain(
 		&mut self,
-		source: &mut Buffer<'_, N, impl Pool<N>>,
+		source: &mut Buffer<'d, N, impl Pool<N>>,
 		count: usize
 	) -> BufferResult<usize>;
 	/// Drains a buffer by writing all its data into the sink, returning the number
 	/// of bytes read.
 	fn drain_all(
 		&mut self,
-		source: &mut Buffer<'_, N, impl Pool<N>>
+		source: &mut Buffer<'d, N, impl Pool<N>>
 	) -> BufferResult<usize> {
 		self.drain(source, usize::MAX)
 	}
@@ -125,13 +124,13 @@ pub trait Sink<const N: usize = SIZE>: Stream {
 	fn flush(&mut self) -> Result { Ok(()) }
 }
 
-pub trait BufStream<const N: usize = SIZE>: Stream {
+pub trait BufStream<'d, const N: usize = SIZE>: Stream<N> {
 	type Pool: Pool<N>;
 
 	/// Borrows the stream buffer.
-	fn buf(&self) -> &Buffer<'_, N, Self::Pool>;
+	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, Self::Pool> where 'd: 'b;
 	/// Borrows the stream buffer mutably.
-	fn buf_mut(&mut self) -> &mut Buffer<'_, N, Self::Pool>;
+	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, Self::Pool> where 'd: 'b;
 }
 
 /// The result of a buffered *find* operation such as [`read_utf8_line`].
@@ -157,37 +156,43 @@ impl From<Utf8Match> for (usize, bool) {
 	}
 }
 
-pub trait BufSource<const N: usize = SIZE>: BufStream<N> + Source<N> {
-	/// Reads at most `count` bytes into the buffer, returning the available count.
+pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N> {
+	/// Returns the number of bytes available for reading.
+	fn available(&self) -> usize {
+		self.buf().count()
+	}
+	/// Reads at most `count` bytes into the buffer, returning the whether enough
+	/// bytes are available.
 	/// To return an end-of-stream error, use [`require`] instead.
 	///
-	/// Note that a request returning `0` doesn't necessarily mean the stream has
-	/// ended. To check if end-of-stream was reached, use [`is_eos`].
+	/// Note that a request returning `false` doesn't necessarily mean the stream
+	/// has ended. To check if end-of-stream was reached, use [`is_eos`].
 	///
 	/// [`require`]: Self::require
 	/// [`is_eos`]: Self::is_eos
-	fn request(&mut self, count: usize) -> Result<usize>;
+	fn request(&mut self, count: usize) -> Result<bool>;
 	/// Reads at least `count` bytes into the buffer, returning the available count
 	/// if successful, or an end-of-stream error if not. For a softer version that
 	/// returns an available count, use [`request`].
 	///
 	/// [`request`]: Self::request
 	fn require(&mut self, count: usize) -> Result<()> {
-		if self.is_eos() || self.request(count) < count {
+		if self.is_eos() || self.request(count)? {
 			return Err(StreamError::end_of_stream(count, Read))
 		}
 		Ok(())
 	}
 
 	/// Reads up to `count` bytes into `sink`, returning the number of bytes read.
-	fn read(&mut self, sink: &mut impl Sink<N>, mut count: usize) -> Result<usize> {
-		count = min(count, self.request(count)?);
+	fn read(&mut self, sink: &mut impl Sink<'d, N>, mut count: usize) -> Result<usize> {
+		self.request(count)?;
+		count = count.min(self.available());
 		sink.drain(self.buf_mut(), count)
 			.context(Read)
 	}
 
 	/// Reads all available bytes into `sink`, returning the number of bytes read.
-	fn read_all(&mut self, sink: &mut impl Sink<N>) -> Result<usize> {
+	fn read_all(&mut self, sink: &mut impl Sink<'d, N>) -> Result<usize> {
 		sink.drain_all(self.buf_mut())
 			.context(Read)
 	}
@@ -198,18 +203,18 @@ pub trait BufSource<const N: usize = SIZE>: BufStream<N> + Source<N> {
 	}
 
 	/// Reads bytes into a slice, returning the number of bytes read.
-	fn read_slice(&mut self, mut buf: &mut [u8]) -> Result<usize> {
-		self.read_count_spec(buf.len(), |src, _| {
-			let read = src.read_slice(buf)?;
-			buf = &mut buf[read..];
-			Ok(read)
+	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
+		let mut read = 0;
+		self.read_count_spec(buf.len(), move |src, _| {
+			read += src.read_slice(&mut buf[read..])?;
+			Ok::<_, StreamError>(read)
 		})
 	}
 
 	/// Reads the exact length of bytes into a slice, returning the number of bytes
 	/// read if successful, or an end-of-stream error if the slice could not be filled.
 	/// Bytes are not consumed if an end-of-stream error is returned.
-	fn read_slice_exact(&mut self, mut buf: &mut [u8]) -> Result<usize> {
+	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
 		self.require(buf.len())?;
 		let read_count = self.buf_mut().read_slice_exact(buf)?;
 		assert_eq!(read_count, buf.len());
@@ -322,8 +327,8 @@ pub trait BufSource<const N: usize = SIZE>: BufStream<N> + Source<N> {
 	}
 
 	/// Returns a handle for reading UTF-8 text into `buf`.
-	fn read_utf8(&mut self, buf: &mut String) -> ReadUtf8<'_, N, Self> {
-		ReadUtf8 { source: self, buf }
+	fn read_utf8<'b>(&'b mut self, buf: &'b mut String) -> ReadUtf8<'b, 'd, N, Self> where 'd: 'b {
+		ReadUtf8 { source: self, buf, _d: PhantomData }
 	}
 
 	/// Reads up to `count` UTF-8 bytes into `buf`, returning the number of bytes
@@ -361,25 +366,28 @@ pub trait BufSource<const N: usize = SIZE>: BufStream<N> + Source<N> {
 	/// Reads UTF-8 bytes into `buf` until the `terminator` pattern, returning the
 	/// number of bytes read and whether the pattern was found. If a decode error
 	/// occurs, no data is consumed and `buf` will contain the last valid data.
-	fn read_utf8_until<'p>(&mut self, buf: &mut String, terminator: impl Pattern<'p>) -> Result<Utf8Match> {
-		self.read_spec(|src| src.read_utf8_until(buf, terminator))
-			.map(Into::into)
+	fn read_utf8_until<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
+		//self.read_spec(|src| src.read_utf8_until(buf, terminator))
+		//	.map(Into::into)
+		todo!()
 	}
 
 	/// Reads UTF-8 bytes into `buf` until and including the `terminator` pattern,
 	/// returning the number of bytes read and whether the pattern was found. If a
 	/// decode error occurs, no data is consumed and `buf` will contain the last
 	/// valid data.
-	fn read_utf8_until_inclusive<'p>(&mut self, buf: &mut String, terminator: impl Pattern<'p>) -> Result<Utf8Match> {
-		self.read_spec(|src| src.read_utf8_until_inclusive(buf, terminator))
-			.map(Into::into)
+	fn read_utf8_until_inclusive<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
+		//self.read_spec(|src| src.read_utf8_until_inclusive(buf, terminator))
+		//	.map(Into::into)
+		todo!()
 	}
 }
 
 /// A UTF-8 read operation.
-pub struct ReadUtf8<'a, const N: usize, S: BufSource<N>> {
-	source: &'a mut S,
-	buf: &'a mut String
+pub struct ReadUtf8<'b, 'd: 'b, const N: usize, S: BufSource<'d, N> + ?Sized> {
+	source: &'b mut S,
+	buf: &'b mut String,
+	_d: PhantomData<&'d ()>,
 }
 
 struct NewLinePattern;
@@ -414,7 +422,7 @@ unsafe impl<'a> Searcher<'a> for NewLineSearcher<'a> {
 	}
 }
 
-impl<'a, const N: usize, S: BufSource<N>> ReadUtf8<'a, N, S> {
+impl<'b, 'd: 'b, const N: usize, S: BufSource<'d, N>> ReadUtf8<'b, 'd, N, S> {
 	pub fn to_end(self) -> Result<usize> {
 		self.source.read_utf8_to_end(self.buf)
 	}
@@ -431,40 +439,42 @@ impl<'a, const N: usize, S: BufSource<N>> ReadUtf8<'a, N, S> {
 		self.source.read_utf8_line_inclusive(self.buf)
 	}
 
-	pub fn until<P: Pattern<'a>>(self, pattern: P) -> Result<Utf8Match> {
+	pub fn until<P: Pattern<'b>>(self, pattern: P) -> Result<Utf8Match> {
 		self.source.read_utf8_until(self.buf, pattern)
 	}
 
-	pub fn until_inclusive<P: Pattern<'a>>(self, pattern: P) -> Result<Utf8Match> {
+	pub fn until_inclusive<P: Pattern<'b>>(self, pattern: P) -> Result<Utf8Match> {
 		self.source.read_utf8_until_inclusive(self.buf, pattern)
 	}
 }
 
-trait BufSourceSpec<const N: usize>: BufSource<N> {
+trait BufSourceSpec<'d, const N: usize>: BufSource<'d, N> {
 	fn read_spec<R: Into<(usize, bool)>>(
 		&mut self,
-		mut read: impl FnMut(&mut Buffer<N, Self::Pool>) -> Result<R>
+		mut read: impl FnMut(&mut Buffer<'d, N, <Self as BufStream<'d, N>>::Pool>) -> Result<R>
 	) -> Result<(usize, bool)> {
 		let mut count = 0;
 		loop {
 			let (read, term) = read(self.buf_mut())?.into();
 			count += read;
 			if term { break Ok((count, term)) }
-			if self.is_eos() || self.request(self.buf().limit()) == 0 {
+			self.request(self.buf().limit())?;
+			if self.is_eos() || self.available() == 0 {
 				break Ok((count, false))
 			}
 		}
 	}
 
-	fn read_count_spec(
+	fn read_count_spec<E>(
 		&mut self,
 		mut count: usize,
-		mut read: impl FnMut(&mut Buffer<N, Self::Pool>, usize) -> Result<usize>
-	) -> Result<usize> {
+		mut read: impl FnMut(&mut Buffer<'d, N, <Self as BufStream<'d, N>>::Pool>, usize) -> Result<usize, E>
+	) -> Result<usize> where StreamError: From<E> {
 		let initial = count;
 		while count > 0 {
 			count -= read(self.buf_mut(), count)?;
-			if self.is_eos() || self.request(count) == 0 {
+			self.request(count)?;
+			if self.is_eos() || self.available() == 0 {
 				break
 			}
 		}
@@ -472,23 +482,23 @@ trait BufSourceSpec<const N: usize>: BufSource<N> {
 	}
 }
 
-impl<const N: usize, T: BufSource<N> + ?Sized> BufSourceSpec<N> for T { }
+impl<'d, const N: usize, T: BufSource<'d, N> + ?Sized> BufSourceSpec<'d, N> for T { }
 
-pub trait BufSink<'d, const N: usize = SIZE>: BufStream<N> + Sink<N> {
+pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	/// Writes up to `count` bytes from `source`, returning the number of bytes written.
-	fn write(&mut self, source: &mut impl Source<N>, count: usize) -> Result<usize> {
+	fn write(&mut self, source: &mut impl Source<'d, N>, count: usize) -> Result<usize> {
 		source.fill(self.buf_mut(), count)
 			  .context(Write)
 	}
 
 	/// Writes all available bytes from `source`, returning the number of bytes written.
-	fn write_all(&mut self, source: &mut impl Source<N>) -> Result<usize> {
+	fn write_all(&mut self, source: &mut impl Source<'d, N>) -> Result<usize> {
 		source.fill_all(self.buf_mut())
 			  .context(Write)
 	}
 
 	/// Writes bytes from a slice, returning the number of bytes written.
-	fn write_from_slice(&mut self, mut buf: &'d [u8]) -> Result<usize> {
+	fn write_from_slice(&mut self, mut buf: &[u8]) -> Result<usize> {
 		let mut count = 0;
 		while !buf.is_empty() {
 			let written = self.buf_mut().write_from_slice(buf).context(Write)?;
@@ -592,12 +602,17 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<N> + Sink<N> {
 		self.write_from_slice(bytemuck::bytes_of(&value))?;
 		Ok(())
 	}
+
+	/// Writes a UTF-8 string.
+	fn write_utf8(&mut self, value: &str) -> Result<usize> {
+		self.write_from_slice(value.as_bytes())
+	}
 }
 
 trait BufSinkSpec<'d, const N: usize>: BufSink<'d, N> {
 	fn write_spec(
 		&mut self,
-		mut write: impl FnMut(&mut Buffer<'d, N, Self::Pool>, &mut bool) -> Result<usize>
+		mut write: impl FnMut(&mut Buffer<'d, N, <Self as BufStream<'d, N>>::Pool>, &mut bool) -> Result<usize>
 	) -> Result<usize> {
 		let mut count = 0;
 		let mut term = false;
@@ -610,7 +625,7 @@ trait BufSinkSpec<'d, const N: usize>: BufSink<'d, N> {
 	fn write_count_spec(
 		&mut self,
 		mut count: usize,
-		mut write: impl FnMut(&mut Buffer<'d, N, Self::Pool>, usize) -> Result<usize>
+		mut write: impl FnMut(&mut Buffer<'d, N, <Self as BufStream<'d, N>>::Pool>, usize) -> Result<usize>
 	) -> Result<usize> {
 		let initial = count;
 		while count > 0 {

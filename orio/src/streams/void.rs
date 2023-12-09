@@ -15,11 +15,11 @@ pub fn void_source() -> VoidSource { VoidSource }
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VoidSink;
 
-impl Stream for VoidSink { }
+impl<const N: usize> Stream<N> for VoidSink { }
 
-impl<const N: usize> Sink<N> for VoidSink {
+impl<'d, const N: usize> Sink<'d, N> for VoidSink {
 	/// Skips `count` bytes at `source`.
-	fn drain(&mut self, source: &mut Buffer<'_, N, impl Pool<N>>, count: usize) -> Result<usize> {
+	fn drain(&mut self, source: &mut Buffer<'d, N, impl Pool<N>>, count: usize) -> Result<usize> {
 		if count < source.count() {
 			source.skip(count).context(Drain)
 		} else {
@@ -28,7 +28,7 @@ impl<const N: usize> Sink<N> for VoidSink {
 	}
 
 	/// Skips all bytes at `source`.
-	fn drain_all(&mut self, source: &mut Buffer<'_, N, impl Pool<N>>) -> Result<usize> {
+	fn drain_all(&mut self, source: &mut Buffer<'d, N, impl Pool<N>>) -> Result<usize> {
 		let count = source.count();
 		source.clear().context(Drain)?;
 		Ok(count)
@@ -39,16 +39,18 @@ impl<const N: usize> Sink<N> for VoidSink {
 #[derive(Copy, Clone, Debug, Default)]
 pub struct VoidSource;
 
-impl Stream for VoidSource { }
+impl<const N: usize> Stream<N> for VoidSource { }
 
-impl<const N: usize> Source<N> for VoidSource {
+impl<'d, const N: usize> Source<'d, N> for VoidSource {
+	fn is_eos(&self) -> bool { true }
+
 	/// Reads nothing.
-	fn fill(&mut self, _: &mut Buffer<'_, N, impl Pool<N>>, _: usize) -> Result<usize> {
+	fn fill(&mut self, _: &mut Buffer<'d, N, impl Pool<N>>, _: usize) -> Result<usize> {
 		Ok(0)
 	}
 
 	/// Reads nothing.
-	fn fill_all(&mut self, _: &mut Buffer<'_, N, impl Pool<N>>) -> Result<usize> {
+	fn fill_all(&mut self, _: &mut Buffer<'d, N, impl Pool<N>>) -> Result<usize> {
 		Ok(0)
 	}
 }

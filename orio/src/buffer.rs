@@ -12,7 +12,7 @@ use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
-use crate::pool::{DefaultPoolContainer, MutPool, Pool, pool};
+use crate::pool::{DefaultPoolContainer, Pool, pool};
 use crate::{BufferContext, BufferResult as Result, pool, ResultContext, Seg, StreamContext, StreamResult};
 use crate::BufferContext::{Compact, Copy, Read, Reserve};
 use crate::segment::RBuf;
@@ -34,11 +34,11 @@ pub struct Buffer<
 	compact_threshold: usize,
 }
 
-impl<'d, const N: usize> Default for Buffer<'d, N> {
+impl Default for Buffer<'_> {
 	fn default() -> Self { BufferOptions::default().into() }
 }
 
-impl<const N: usize> From<BufferOptions> for Buffer<'_, N> {
+impl From<BufferOptions> for Buffer<'_> {
 	fn from(options: BufferOptions) -> Self {
 		Self::new(pool(), options)
 	}
@@ -60,7 +60,7 @@ impl<const N: usize, P: Pool<N>> Debug for Buffer<'_, N, P> {
 	}
 }
 
-impl<const N: usize> Buffer<'_, N> {
+impl<'d> Buffer<'d> {
 	/// Creates a new "lean" buffer. See [`BufferOptions::lean`] for details.
 	pub fn lean() -> Self { BufferOptions::lean().into() }
 	
@@ -104,7 +104,7 @@ impl<const N: usize> Buffer<'_, N> {
 	/// let mut buf = Buffer::default();
 	/// buf.write_utf8(value)?;
 	/// ```
-	pub fn from_utf8<T: AsRef<str>>(value: T) -> Result<Self> {
+	pub fn from_utf8<T: AsRef<str>>(value: &'d T) -> Result<Self> {
 		let mut buf = Self::default();
 		buf.write_utf8(value.as_ref())?;
 		Ok(buf)
@@ -119,14 +119,14 @@ impl<const N: usize> Buffer<'_, N> {
 	/// let mut buf = Buffer::default();
 	/// buf.write_from_slice(value)?;
 	/// ```
-	pub fn from_slice<T: AsRef<[u8]>>(value: T) -> Result<Self> {
+	pub fn from_slice<T: AsRef<[u8]>>(value: &'d T) -> Result<Self> {
 		let mut buf = Self::default();
 		buf.write_from_slice(value.as_ref())?;
 		Ok(buf)
 	}
 }
 
-impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
+impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	/// Creates a new buffer.
 	pub fn new(
 		pool: P,
@@ -211,16 +211,12 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 
 		let len = data.len();
 		let mut i = 0;
-		let mut slice = data.make_contiguous();
-
-		let mut advance = || {
-			i += 1;
-			slice = &mut slice[1..];
-		};
+		let slice = data.make_contiguous();
+		let mut offset = 0;
 
 		let result: pool::Result = try {
 			while i < len {
-				match &mut slice[..len] {
+				match &mut slice[offset..offset + len] {
 					[a, _, ..] if a.is_shared() && !a.is_slice() && !a.is_full() => {
 						// Variable-length shared segments may be larger than one
 						// fixed segment. Splitting these would be non-trivial with
@@ -239,13 +235,15 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 							debug_assert!(shared.is_empty());
 							pool.collect_one(shared)?;
 						} else {
-							advance();
+							i += 1;
+							offset += 1;
 						}
 					}
 					[a, b, ..] if !a.is_shared() => {
 						let written = a.write_from(b);
 						let offset = if written.is_none() || a.is_full() {
-							advance();
+							i += 1;
+							offset += 1;
 							0
 						} else {
 							1
@@ -289,7 +287,7 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 	/// Copies `count` bytes into `sink`. Memory is either actually copied or
 	/// shared for performance; the tradeoff between wasted space by sharing small
 	/// segments and large, expensive mem-copies is managed by the implementation.
-	pub fn copy_to(&self, sink: &mut Buffer<N, impl Pool<N>>, mut count: usize) -> Result {
+	pub fn copy_to(&self, sink: &mut Buffer<'d, N, impl Pool<N>>, mut count: usize) -> Result {
 		if count == 0 { return Ok(()) }
 		let share_threshold = sink.share_threshold;
 
@@ -298,7 +296,7 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 				if count == 0 { break }
 
 				let size = min(seg.len(), count);
-				let mut shared = seg.share(size);
+				let mut shared = seg.share(..size);
 				if size > share_threshold {
 					sink.data.push_back(shared);
 					count -= size;
@@ -325,29 +323,32 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 	/// performance; the tradeoff between wasted space by sharing small segments and
 	/// large, expensive mem-copies is managed by the implementation.
 	#[inline]
-	pub fn copy_all_to(&self, sink: &mut Buffer<N, impl Pool<N>>) -> Result {
+	pub fn copy_all_to(&self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> Result {
 		self.copy_to(sink, self.count())
 	}
 
 	/// Skips up to `count` bytes.
-	pub fn skip(&mut self, mut count: usize) -> Result<usize> {
+	pub fn skip(&mut self, count: usize) -> Result<usize> {
 		if count >= self.count() {
 			self.clear().context(Read)?;
 			return Ok(count)
 		}
 
-		let Some(mut cursor) = self.data.read(&mut self.pool) else { return Ok(0) };
+		let mut seg_count = 0;
 		let mut skipped = 0;
-		while count > 0 {
-			let n = cursor.get_mut().consume(count);
-			count -= n;
-			skipped += n;
-
-			if !cursor.has_next() {
+		for (i, seg) in self.data.iter_mut().enumerate() {
+			let remaining = count - skipped;
+			if remaining > 0 {
+				skipped += seg.consume(remaining);
+			} else {
+				seg_count = i;
 				break
 			}
 		}
-		self.resize()?;
+		self.data.invalidate();
+		self.pool
+			.collect(self.data.drain(seg_count))
+			.context(Read)?;
 		Ok(count)
 	}
 
@@ -392,7 +393,7 @@ impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
 			let end = min(count, seg.len());
 
 			let mut invalid = false;
-			let search = |mut slice| {
+			let mut search = |mut slice: &[_]| {
 				if invalid {
 					return None
 				}
@@ -472,18 +473,18 @@ impl<const N: usize, P: Pool<N>> Drop for Buffer<'_, N, P> {
 	}
 }
 
-impl<const N: usize, P: Pool<N>> Stream for Buffer<'_, N, P> {
+impl<const N: usize, P: Pool<N>> Stream<N> for Buffer<'_, N, P> {
 	fn close(&mut self) -> StreamResult {
 		self.clear()?;
 		Ok(())
 	}
 }
 
-impl<const N: usize, P: Pool<N>> BufStream<N> for Buffer<'_, N, P> {
+impl<'d, const N: usize, P: Pool<N>> BufStream<'d, N> for Buffer<'d, N, P> {
 	type Pool = P;
 
-	fn buf(&self) -> &Self { self }
-	fn buf_mut(&mut self) -> &mut Self { self }
+	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, P> where 'd: 'b { self }
+	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, P> where 'd: 'b { self }
 }
 
 impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {

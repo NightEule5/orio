@@ -24,14 +24,8 @@ pub type BufferResult<T = ()> = Result<T, BufferError>;
 pub type StreamResult<T = ()> = Result<T, StreamError>;
 
 /// An IO error.
-#[derive(Clone, Debug, From)]
+#[derive(Clone, Debug)]
 pub struct Error<C: sealed::Context> {
-	#[from]
-	#[from(io::Error)]
-	#[from(Utf8Error)]
-	#[from(PoolError)]
-	#[from(StreamError)]
-	#[from(BufferError)]
 	pub(crate) source: ErrorSource,
 	pub(crate) context: C
 }
@@ -104,15 +98,15 @@ pub enum StreamContext {
 #[error(transparent)]
 pub enum ErrorSource {
 	/// The underlying stream is closed.
-	Closed(StreamClosed),
+	Closed(#[from(StreamClosed)] StreamClosed),
 	/// End-of-stream was reached prematurely.
-	Eos(EndOfStream),
+	Eos(#[from(EndOfStream)] EndOfStream),
 	/// An IO error.
 	Io(#[from(io::Error)] Rc<io::Error>), // Rc to get around io::Error not implementing Clone
 	/// A UTF-8 decode error.
-	Utf8(#[from] Utf8Error),
+	Utf8(#[from(Utf8Error)] Utf8Error),
 	/// A pool error.
-	Pool(#[from] PoolError),
+	Pool(#[from(PoolError)] PoolError),
 	/// A stream error.
 	Stream(#[from(StreamError)] Box<StreamError>),
 	/// A buffer error.
@@ -123,11 +117,78 @@ pub trait ResultContext<T, C: sealed::Context> {
 	fn context(self, context: C) -> Result<T, Error<C>>;
 }
 
+pub trait ResultSetContext<T, C: sealed::Context> {
+	fn set_context(self, context: C) -> Result<T, Error<C>>;
+}
+
 impl<C: sealed::Context> fmt::Display for Error<C> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match (self, f.alternate()) {
 			(Self { source, context }, true ) => write!(f, "{source} while {context}"),
 			(Self { source, ..      }, false) => fmt::Display::fmt(source, f)
+		}
+	}
+}
+
+impl<C: sealed::Context + Default> From<StreamClosed> for Error<C> {
+	fn from(value: StreamClosed) -> Self {
+		Self {
+			source: value.into(),
+			context: C::default(),
+		}
+	}
+}
+
+impl<C: sealed::Context + Default> From<EndOfStream> for Error<C> {
+	fn from(value: EndOfStream) -> Self {
+		Self {
+			source: value.into(),
+			context: C::default(),
+		}
+	}
+}
+
+impl<C: sealed::Context + Default> From<io::Error> for Error<C> {
+	fn from(value: io::Error) -> Self {
+		Self {
+			source: value.into(),
+			context: C::default(),
+		}
+	}
+}
+
+impl<C: sealed::Context + Default> From<Utf8Error> for Error<C> {
+	fn from(value: Utf8Error) -> Self {
+		Self {
+			source: value.into(),
+			context: C::default(),
+		}
+	}
+}
+
+impl<C: sealed::Context + Default> From<PoolError> for Error<C> {
+	fn from(value: PoolError) -> Self {
+		Self {
+			source: value.into(),
+			context: C::default(),
+		}
+	}
+}
+
+impl From<BufferError> for StreamError {
+	fn from(value: BufferError) -> Self {
+		Self {
+			source: value.source,
+			context: StreamContext::Buffer(value.context),
+		}
+	}
+}
+
+impl From<StreamError> for BufferError {
+	fn from(value: StreamError) -> Self {
+		Self {
+			source: value.into(),
+			context: BufferContext::None,
 		}
 	}
 }
@@ -158,7 +219,7 @@ impl<C: sealed::Context> Error<C> {
 
 	/// Returns true if the inner error is an "end-of-stream".
 	pub fn is_eos(&self) -> bool {
-		matches!(&self.source, ErrorSource::Eos(_));
+		matches!(&self.source, ErrorSource::Eos(_))
 	}
 
 	/// Returns true if the inner error is an IO error.
@@ -229,14 +290,14 @@ impl<C: sealed::Context> Error<C> {
 	}
 }
 
-impl<T, C: sealed::Context, E: Into<ErrorSource>> ResultContext<T, C> for Result<T, Error<C>> {
+impl<T, C: sealed::Context, E: Into<ErrorSource>> ResultContext<T, C> for Result<T, E> {
 	fn context(self, context: C) -> Result<T, Error<C>> {
-		self.map_err(|err| Error::new(context, err.into()))
+		self.map_err(|err| Error { source: err.into(), context })
 	}
 }
 
-impl<T, C: sealed::Context> ResultContext<T, C> for Result<T, Error<C>> {
-	fn context(mut self, context: C) -> Self {
+impl<T, C: sealed::Context> ResultSetContext<T, C> for Result<T, Error<C>> {
+	fn set_context(mut self, context: C) -> Self {
 		if let Err(ref mut error) = self {
 			error.context = context;
 		}

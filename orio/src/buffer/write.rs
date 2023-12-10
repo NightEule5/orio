@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Buffer, BufferResult, ResultContext, Seg, StreamContext, StreamResult as Result};
+use crate::{Buffer, BufferResult, ResultContext, Seg, StreamResult as Result};
 use crate::BufferContext::Drain;
 use crate::streams::{BufSink, BufSource, Sink};
 use crate::pool::Pool;
 use crate::segment::RBuf;
+use crate::StreamContext::Write;
 
 impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	/// Pushes a string reference to the buffer without copying its data. This is
@@ -37,6 +38,14 @@ impl<'d, const N: usize, P: Pool<N>> Sink<'d, N> for Buffer<'d, N, P> {
 }
 
 impl<'d, const N: usize, P: Pool<N>> BufSink<'d, N> for Buffer<'d, N, P> {
+	fn drain_all_buffered(&mut self) -> BufferResult {
+		Ok(())
+	}
+
+	fn drain_buffered(&mut self) -> BufferResult {
+		Ok(())
+	}
+
 	fn write_from_slice(&mut self, mut value: &[u8]) -> Result<usize> {
 		let mut count = 0;
 
@@ -54,7 +63,7 @@ impl<'d, const N: usize, P: Pool<N>> BufSink<'d, N> for Buffer<'d, N, P> {
 		}
 
 		// Write into segments.
-		self.reserve(value.len()).context(StreamContext::Write)?;
+		self.reserve(value.len()).context(Write)?;
 		while !value.is_empty() {
 			count += self.data.write_back(
 				&mut value,

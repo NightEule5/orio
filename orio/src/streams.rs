@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::result;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use num_traits::PrimInt;
-use crate::pool::Pool;
+use crate::pool::{GetPool, Pool};
 
 mod seeking;
 mod void;
@@ -12,6 +12,7 @@ mod void;
 pub use seeking::*;
 pub use void::*;
 use crate::{Buffer, BufferResult, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
+use crate::buffered_wrappers::{BufferedSink, BufferedSource};
 use crate::StreamContext::{Read, Write};
 
 /// An "stream closed" error.
@@ -53,6 +54,8 @@ impl StreamError {
 pub type Result<T = (), E = StreamError> = result::Result<T, E>;
 
 pub trait Stream<const N: usize> {
+	/// Returns whether the stream is closed.
+	fn is_closed(&self) -> bool;
 	/// Closes the stream if not already closed. For [`Sink`]s, this should flush
 	/// buffered bytes to the sink. Closing must be idempotent; streams that have
 	/// already been closed must return `Ok` on subsequent calls. [`Buffer`] is
@@ -104,33 +107,57 @@ pub trait Source<'d, const N: usize = SIZE>: Stream<N> {
 	}
 }
 
+pub trait SourceExt<'d, const N: usize, P: GetPool<N>>: Source<'d, N> + Sized {
+	fn buffered(self) -> BufferedSource<'d, N, Self, P> {
+		BufferedSource::new(self, Buffer::default())
+	}
+}
+
+impl<'d, const N: usize, S: Source<'d, N>, P: GetPool<N>> SourceExt<'d, N, P> for S { }
+
 pub trait Sink<'d, const N: usize = SIZE>: Stream<N> {
 	/// Drains a buffer by writing up to `count` bytes into the sink, returning the
-	/// number of bytes read.
+	/// number of bytes written.
 	fn drain(
 		&mut self,
 		source: &mut Buffer<'d, N, impl Pool<N>>,
 		count: usize
 	) -> BufferResult<usize>;
+	/// Drains a buffer by writing full segments into the sink, returning the number
+	/// of bytes written.
+	fn drain_full(
+		&mut self,
+		source: &mut Buffer<'d, N, impl Pool<N>>
+	) -> BufferResult<usize> {
+		self.drain(source, source.full_segment_count())
+	}
 	/// Drains a buffer by writing all its data into the sink, returning the number
-	/// of bytes read.
+	/// of bytes written.
 	fn drain_all(
 		&mut self,
 		source: &mut Buffer<'d, N, impl Pool<N>>
 	) -> BufferResult<usize> {
-		self.drain(source, usize::MAX)
+		self.drain(source, source.count())
 	}
 	/// Writes all buffered data to its final target.
 	fn flush(&mut self) -> Result { Ok(()) }
 }
 
+pub trait SinkExt<'d, const N: usize, P: GetPool<N>>: Sink<'d, N> + Sized {
+	fn buffered(self) -> BufferedSink<'d, N, Self, P> {
+		BufferedSink::new(self, Buffer::default())
+	}
+}
+
+impl<'d, const N: usize, S: Sink<'d, N>, P: GetPool<N>> SinkExt<'d, N, P> for S { }
+
 pub trait BufStream<'d, const N: usize = SIZE>: Stream<N> {
 	type Pool: Pool<N>;
 
 	/// Borrows the stream buffer.
-	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, Self::Pool> where 'd: 'b;
+	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, Self::Pool>;
 	/// Borrows the stream buffer mutably.
-	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, Self::Pool> where 'd: 'b;
+	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, Self::Pool>;
 }
 
 /// The result of a buffered *find* operation such as [`read_utf8_line`].
@@ -487,15 +514,37 @@ impl<'d, const N: usize, T: BufSource<'d, N> + ?Sized> BufSourceSpec<'d, N> for 
 pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	/// Writes up to `count` bytes from `source`, returning the number of bytes written.
 	fn write(&mut self, source: &mut impl Source<'d, N>, count: usize) -> Result<usize> {
-		source.fill(self.buf_mut(), count)
-			  .context(Write)
+		let count = source.fill(self.buf_mut(), count)
+			  			  .context(Write)?;
+		self.drain_buffered().context(Write)?;
+		Ok(count)
 	}
 
 	/// Writes all available bytes from `source`, returning the number of bytes written.
 	fn write_all(&mut self, source: &mut impl Source<'d, N>) -> Result<usize> {
-		source.fill_all(self.buf_mut())
-			  .context(Write)
+		let count = source.fill_all(self.buf_mut())
+						  .context(Write)?;
+		self.drain_buffered().context(Write)?;
+		Ok(count)
 	}
+
+	/// Writes all buffered data to the underlying sink, returning memory back to
+	/// the pool. Similar to [`Sink::flush`], but draining doesn't propagate to
+	/// the underlying sink.
+	///
+	/// This is called automatically when needed, and does not usually need to be
+	/// called by the user. It may sometimes be useful if writing to the underlying
+	/// buffer directly, when this method would otherwise be skipped.
+	fn drain_all_buffered(&mut self) -> BufferResult;
+
+	/// Writes full segments of buffered data to the underlying sink, returning
+	/// memory back to the pool. Similar to [`Sink::flush`], but draining doesn't
+	/// propagate to the underlying sink.
+	///
+	/// This is called automatically when needed, and does not usually need to be
+	/// called by the user. It may sometimes be useful if writing to the underlying
+	/// buffer directly, when this method would otherwise be skipped.
+	fn drain_buffered(&mut self) -> BufferResult;
 
 	/// Writes bytes from a slice, returning the number of bytes written.
 	fn write_from_slice(&mut self, mut buf: &[u8]) -> Result<usize> {
@@ -504,6 +553,7 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 			let written = self.buf_mut().write_from_slice(buf).context(Write)?;
 			buf = &buf[written..];
 			count += written;
+			self.drain_buffered().context(Write)?;
 		}
 		Ok(count)
 	}
@@ -604,6 +654,7 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	}
 
 	/// Writes a UTF-8 string.
+	#[inline]
 	fn write_utf8(&mut self, value: &str) -> Result<usize> {
 		self.write_from_slice(value.as_bytes())
 	}

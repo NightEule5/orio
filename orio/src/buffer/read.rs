@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::str::pattern::Pattern;
-use crate::{Buffer, StreamResult as Result, ResultContext, BufferResult, StreamResult};
+use crate::{Buffer, StreamResult as Result, ResultContext, BufferResult, StreamResult, ResultSetContext};
 use super::partial_utf8::*;
 use crate::BufferContext::Fill;
 use crate::pool::Pool;
@@ -13,7 +13,7 @@ impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 		self.is_empty()
 	}
 
-	fn fill(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>, mut count: usize) -> BufferResult<usize> {
+	fn fill(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>, count: usize) -> BufferResult<usize> {
 		if count == 0 { return Ok(0) }
 
 		// Use faster fill_all.
@@ -31,7 +31,7 @@ impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 			}
 		).unwrap();
 
-		sink.reserve(remaining).context(Fill)?;
+		sink.reserve(remaining).set_context(Fill)?;
 
 		sink.data.extend(
 			self.data
@@ -59,12 +59,12 @@ impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 
 		let self_tidy = self.resize();
 		let sink_tidy = sink.check_compact();
-		self_tidy.and(sink_tidy).context(Fill)?;
+		self_tidy.and(sink_tidy).set_context(Fill)?;
 		Ok(count)
 	}
 
 	fn fill_all(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
-		self.resize().context(Fill)?;
+		self.resize().set_context(Fill)?;
 		let read = self.count();
 		// Take the internal ring buffer instead of draining, which should be
 		// significantly faster; similar to Buffer::clear.
@@ -90,7 +90,7 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		Ok(count)
 	}
 
-	fn read_slice_exact(&mut self, mut buf: &mut [u8]) -> Result<usize> {
+	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
 		self.require(buf.len())?;
 		let count = self.read_slice(buf)?;
 		assert_eq!(count, buf.len(), "require should ensure all bytes are available");
@@ -102,7 +102,7 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		let ref mut partial_char = PartialChar::default();
 		while read < count {
 			let remaining = count - read;
-			let Some(mut seg) = self.data.pop_front() else { break };
+			let Some(seg) = self.data.pop_front() else { break };
 			let (a, b) = seg.as_slices_in_range(..remaining.min(seg.len()));
 			read_partial_utf8_into(a, buf, partial_char, &mut read).context(Read)?;
 			read_partial_utf8_into(b, buf, partial_char, &mut read).context(Read)?;
@@ -141,11 +141,11 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		}
 	}
 
-	fn read_utf8_until<'p>(&mut self, buf: &mut String, terminator: impl Pattern<'p>) -> Result<Utf8Match> {
+	fn read_utf8_until<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
 		todo!()
 	}
 
-	fn read_utf8_until_inclusive<'p>(&mut self, buf: &mut String, terminator: impl Pattern<'p>) -> Result<Utf8Match> {
+	fn read_utf8_until_inclusive<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
 		todo!()
 	}
 }

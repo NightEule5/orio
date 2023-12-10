@@ -74,6 +74,11 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 	}
 }
 
+pub trait GetPool<const N: usize = SIZE>: Pool<N> {
+	/// Gets a shared reference to the pool.
+	fn get() -> Self;
+}
+
 /// A mutably-borrowed pool, usually from a [`RefCell`].
 ///
 /// Note on object-safety: this trait is object-safe for single-segment operations,
@@ -172,10 +177,16 @@ where P: MutPool<N> + ?Sized,
 pub(crate) type DefaultPoolContainer = PoolContainer<SIZE, DefaultPool>;
 
 /// Clones a shared reference to the default segment pool.
+#[inline]
 pub fn pool() -> DefaultPoolContainer { POOL.clone() }
 
 #[thread_local]
 static POOL: Lazy<DefaultPoolContainer> = Lazy::new(PoolContainer::default);
+
+impl GetPool<SIZE> for DefaultPoolContainer {
+	#[inline]
+	fn get() -> Self { pool() }
+}
 
 impl MutPool for DefaultPool {
 	fn claim_reserve(&mut self, mut count: usize) {

@@ -18,6 +18,9 @@ mod sealed {
 	impl Context for super::BufferContext { }
 }
 
+pub(crate) trait Context: sealed::Context { }
+impl<C: sealed::Context> Context for C { }
+
 pub type BufferError = Error<BufferContext>;
 pub type StreamError = Error<StreamContext>;
 pub type BufferResult<T = ()> = Result<T, BufferError>;

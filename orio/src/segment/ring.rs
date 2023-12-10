@@ -2,9 +2,7 @@
 
 use std::cmp::min;
 use std::collections::VecDeque;
-use std::mem;
 use std::ops::{Index, IndexMut};
-use crate::pool::{MutPool, Pool};
 use super::Seg;
 
 // Todo: since shared segments may become writable later (when an Rc is dropped),
@@ -51,6 +49,11 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 	/// Returns `true` if the buffer contains empty segments.
 	pub fn has_empty(&self) -> bool { self.len < self.capacity() }
+
+	/// Returns a reference to the back segment.
+	pub fn back(&self) -> Option<&Seg<'a, N>> {
+		(!self.is_empty()).then(|| &self.buf[self.back_index()])
+	}
 
 	/// Pushes `seg` to the front of the buffer.
 	pub fn push_front(&mut self, seg: Seg<'a, N>) {
@@ -146,11 +149,6 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		}
 	}
 
-	/// Returns a cursor for reading segments.
-	pub fn read(&'a mut self, pool: &'a mut impl Pool<N>) -> Option<ReadCursor<'a, '_, N, impl Pool<N>>> {
-		(!self.is_empty()).then(move || ReadCursor::new(self, pool))
-	}
-
 	/// Drains up to `count` segments from the buffer.
 	pub fn drain(&mut self, count: usize) -> impl Iterator<Item = Seg<'a, N>> + '_ {
 		// Drain all segments
@@ -221,9 +219,10 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 	/// Returns a pair of slices which contain the buffer segments, in order, with
 	/// written segments at the front and empty segments at the back. Using these
-	/// invalidates the buffer, and must be followed by [`invalidate`].
+	/// may invalidate the buffer, and must be followed by [`invalidate`].
 	///
 	/// [`invalidate`]: Self::invalidate
+	#[allow(dead_code)] // May be used later
 	pub fn as_mut_slices(&mut self) -> (&mut [Seg<'a, N>], &mut [Seg<'a, N>]) {
 		self.buf.as_mut_slices()
 	}
@@ -335,154 +334,11 @@ impl<T> Index<usize> for RBuf<T> {
 }
 
 impl<T> IndexMut<usize> for RBuf<T> {
+	/// Gets a mutable reference to a segment at `index`. Using this reference may
+	/// invalidate the buffer, and must be followed by [`invalidate`].
+	///
+	/// [`invalidate`]: Self::invalidate
 	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
 		&mut self.buf[index]
-	}
-}
-
-#[derive(Debug)]
-pub(crate) struct ReadCursor<'a: 'b, 'b, const N: usize, P: Pool<N>> {
-	buf: &'b mut RBuf<Seg<'a, N>>,
-	pool: &'b mut P,
-	off: usize,
-	len: usize,
-	dirty: bool,
-	empty_len: usize,
-	cur_size:  usize,
-	cur_count: usize,
-	cur_limit: usize,
-}
-
-impl<'a: 'b, 'b, const N: usize, P: Pool<N>> ReadCursor<'a, 'b, N, P> {
-	pub fn get(&self) -> &Seg<'a, N> {
-		&self.buf.buf[self.off]
-	}
-
-	pub fn get_mut(&mut self) -> &mut Seg<'a, N> {
-		&mut self.buf.buf[self.off]
-	}
-
-	pub fn has_next(&mut self) -> bool { !self.is_back() }
-	pub fn has_prev(&mut self) -> bool { self.off > 0 }
-
-	pub fn next(&mut self) -> Option<&mut Seg<'a, N>> {
-		self.update();
-		if !self.has_next() { return None }
-		self.off += 1;
-		self.reset();
-		Some(self.get_mut())
-	}
-
-	pub fn prev(&mut self) -> Option<&mut Seg<'a, N>> {
-		self.update();
-		if !self.has_prev() { return None }
-		self.off -= 1;
-		self.reset();
-		Some(self.get_mut())
-	}
-
-	pub fn front(&mut self) -> Option<&mut Seg<'a, N>> {
-		self.update();
-		if self.len == 0 { return None }
-		self.off = 0;
-		self.reset();
-		Some(self.get_mut())
-	}
-
-	pub fn swap(&mut self, seg: &mut Seg<'a, N>) -> bool {
-		if self.len > 0 {
-			mem::swap(self.get_mut(), seg);
-			true
-		} else {
-			false
-		}
-	}
-}
-
-impl<'a: 'b, 'b, const N: usize, P: Pool<N>> ReadCursor<'a, 'b, N, P> {
-	fn new(buf: &'b mut RBuf<Seg<'a, N>>, pool: &'b mut P) -> Self {
-		let len = buf.len;
-		let front = &buf.buf[0];
-		let cur_size = front.size();
-		let cur_count = front.len();
-		let cur_limit = front.limit();
-
-		Self {
-			buf,
-			pool,
-			off: 0,
-			len,
-			dirty: true,
-			empty_len: 0,
-			cur_size,
-			cur_count,
-			cur_limit
-		}
-	}
-
-	fn is_back(&self) -> bool {
-		self.off + 1 == self.len
-	}
-
-	fn reset(&mut self) {
-		let cur = self.get();
-		let cur_size = cur.size();
-		let cur_count = cur.len();
-		let cur_limit = cur.limit();
-		self.dirty = true;
-		self.cur_size = cur_size;
-		self.cur_count = cur_count;
-		self.cur_limit = cur_limit;
-	}
-
-	fn update(&mut self) {
-		if !self.dirty { return }
-
-		let seg = self.get();
-		let delta_size  = seg.size () as isize - self.cur_size  as isize;
-		let delta_count = seg.len  () as isize - self.cur_count as isize;
-		let delta_limit = seg.limit() as isize - self.cur_limit as isize;
-		if seg.is_empty() {
-			self.empty_len += 1;
-		} else if self.cur_count == 0 {
-			self.empty_len -= 1;
-		}
-
-		let is_back = self.is_back();
-		let RBuf { size, count, limit, .. } = self.buf;
-		*size  = size .saturating_add_signed(delta_size );
-		*count = count.saturating_add_signed(delta_count);
-		if is_back {
-			*limit = limit.saturating_add_signed(delta_limit);
-		}
-
-		self.dirty = false;
-	}
-
-	fn trim_or_rotate_empty(&mut self) {
-		if let Ok(mut pool) = self.pool.try_borrow() {
-			for seg in self.buf.drain(self.empty_len) {
-				pool.collect_one(seg);
-			}
-		} else {
-			let empty_limit: usize =
-				self.buf
-					.buf
-					.range(..self.empty_len)
-					.map(Seg::limit)
-					.sum();
-			self.buf.limit += empty_limit;
-			self.buf.rotate_back(self.empty_len);
-			self.off = 0;
-			self.len = self.buf.len();
-			self.empty_len = 0;
-		}
-	}
-}
-
-impl<'a: 'b, 'b, const N: usize, P: Pool<N>> Drop for ReadCursor<'a, 'b, N, P> {
-	fn drop(&mut self) {
-		self.update();
-		self.trim_or_rotate_empty();
 	}
 }

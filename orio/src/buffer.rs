@@ -12,13 +12,14 @@ use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
-use crate::pool::{DefaultPoolContainer, Pool, pool};
-use crate::{BufferContext, BufferResult as Result, pool, ResultContext, Seg, StreamContext, StreamResult};
-use crate::BufferContext::{Compact, Copy, Read, Reserve};
+use crate::pool::{DefaultPoolContainer, GetPool, Pool};
+use crate::{BufferResult as Result, pool, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
+use crate::BufferContext::{Clear, Compact, Copy, Read, Reserve, Resize};
 use crate::segment::RBuf;
 use crate::streams::{BufSink, BufStream, Seekable, SeekOffset, Stream};
 
 // Todo: track how much space is reserved to keep empty segments after resize-on-read.
+// Todo: remove compacting?
 
 /// A dynamically-resizing byte buffer which borrows and returns pool memory as
 /// needed.
@@ -34,13 +35,13 @@ pub struct Buffer<
 	compact_threshold: usize,
 }
 
-impl Default for Buffer<'_> {
+impl<const N: usize, P: GetPool<N>> Default for Buffer<'_, N, P> {
 	fn default() -> Self { BufferOptions::default().into() }
 }
 
-impl From<BufferOptions> for Buffer<'_> {
+impl<const N: usize, P: GetPool<N>> From<BufferOptions> for Buffer<'_, N, P> {
 	fn from(options: BufferOptions) -> Self {
-		Self::new(pool(), options)
+		Self::new(P::get(), options)
 	}
 }
 
@@ -60,7 +61,7 @@ impl<const N: usize, P: Pool<N>> Debug for Buffer<'_, N, P> {
 	}
 }
 
-impl<'d> Buffer<'d> {
+impl<'d, const N: usize, P: GetPool<N>> Buffer<'d, N, P> {
 	/// Creates a new "lean" buffer. See [`BufferOptions::lean`] for details.
 	pub fn lean() -> Self { BufferOptions::lean().into() }
 	
@@ -162,7 +163,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		let segments = self.take_buf();
 		self.pool
 			.collect(segments)
-			.context(BufferContext::Clear)
+			.context(Clear)
 	}
 
 	/// Reserves at least `count` bytes of additional memory in the buffer. This
@@ -271,7 +272,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	fn resize(&mut self) -> Result {
 		let Self { pool, data, .. } = self;
 		pool.collect(data.drain_all_empty())
-			.context(BufferContext::Resize)
+			.context(Resize)
 	}
 
 	/// Compacts segments after writing, if fragmentation has reached to set
@@ -316,7 +317,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 
 			sink.check_compact()?;
 		};
-		result.context(Copy)
+		result.set_context(Copy)
 	}
 
 	/// Copies all bytes into `sink`. Memory is either actually copied or shared for
@@ -330,7 +331,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	/// Skips up to `count` bytes.
 	pub fn skip(&mut self, count: usize) -> Result<usize> {
 		if count >= self.count() {
-			self.clear().context(Read)?;
+			self.clear().set_context(Read)?;
 			return Ok(count)
 		}
 
@@ -450,19 +451,25 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 
 		None
 	}
-
-	/// Clears and closed the buffer.
-	pub fn close(&mut self) -> StreamResult { Ok(self.clear()?) }
 }
 
 impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
+	pub(crate) fn full_segment_count(&self) -> usize {
+		let mut len = self.data.len();
+		if !self.data.back().is_some_and(Seg::is_full) {
+			len -= 1;
+		}
+
+		self.data.iter().take(len).map(Seg::len).sum()
+	}
+
 	/// Swaps internal buffers.
 	pub(crate) fn swap(&mut self, Buffer { data, .. }: &mut Buffer<'d, N, impl Pool<N>>) {
 		mem::swap(&mut self.data, data);
 	}
 
 	/// Takes the internal buffer, leaving a new one in its place.
-	fn take_buf(&mut self) -> RBuf<Seg<'d, N>> {
+	pub(crate) fn take_buf(&mut self) -> RBuf<Seg<'d, N>> {
 		mem::take(&mut self.data)
 	}
 }
@@ -474,6 +481,11 @@ impl<const N: usize, P: Pool<N>> Drop for Buffer<'_, N, P> {
 }
 
 impl<const N: usize, P: Pool<N>> Stream<N> for Buffer<'_, N, P> {
+	/// Returns whether the buffer is closed; always returns `false`.
+	#[inline(always)]
+	fn is_closed(&self) -> bool { false }
+	/// Clears the buffer.
+	#[inline]
 	fn close(&mut self) -> StreamResult {
 		self.clear()?;
 		Ok(())
@@ -483,8 +495,8 @@ impl<const N: usize, P: Pool<N>> Stream<N> for Buffer<'_, N, P> {
 impl<'d, const N: usize, P: Pool<N>> BufStream<'d, N> for Buffer<'d, N, P> {
 	type Pool = P;
 
-	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, P> where 'd: 'b { self }
-	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, P> where 'd: 'b { self }
+	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, P> { self }
+	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, P> { self }
 }
 
 impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {

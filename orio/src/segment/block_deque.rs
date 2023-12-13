@@ -5,10 +5,10 @@
 //! [`VecDeque`]: std::collections::VecDeque
 
 use std::{fmt, mem, slice};
-use std::iter::FusedIterator;
+use std::cmp::min;
+use std::iter::{FusedIterator};
 use std::ops::{IndexMut, Range, RangeBounds};
 use std::rc::Rc;
-use super::SliceExt;
 
 /// A lightweight, fixed-size deque based on [`VecDeque`].
 ///
@@ -40,9 +40,29 @@ pub fn buf<const N: usize>() -> Box<[u8; N]> {
 	unsafe { Box::<[_; N]>::new_uninit().assume_init() }
 }
 
+fn split_range_mut<T>(slice: &mut [T], mut a: Range<usize>, mut b: Range<usize>) -> (&mut [T], &mut [T]) {
+	let is_overlapping = b.contains(&a.start) || (!a.is_empty() && b.contains(&(a.end - 1)));
+	assert!(!is_overlapping);
+
+	if a.end <= b.start {
+		let (slice_a, slice_b) = slice.split_at_mut(a.end);
+		b.start -= slice_a.len();
+		b.end   -= slice_a.len();
+		(&mut slice_a[a], &mut slice_b[b])
+	} else {
+		let (slice_b, slice_a) = slice.split_at_mut(b.end);
+		a.start -= slice_b.len();
+		b.end   -= slice_b.len();
+		(&mut slice_a[a], &mut slice_b[b])
+	}
+}
+
 impl<const N: usize> BlockDeque<N> {
 	/// Creates a new deque.
 	pub fn new() -> Self { buf().into() }
+	pub fn from_array(array: [u8; N]) -> Self {
+		Self { buf: Box::new(array).into(), head: 0, len: N }
+	}
 	/// Creates a new deque with bytes filling by `populate`.
 	pub fn populated(populate: impl FnOnce(&mut [u8; N]) -> usize) -> Self {
 		let mut b = buf();
@@ -119,10 +139,7 @@ impl<const N: usize> BlockDeque<N> {
 	/// or `None` if the deque is shared.
 	pub fn as_mut_slices(&mut self) -> Option<(&mut [u8], &mut [u8])> {
 		let (a, b) = self.slice_ranges(.., self.len);
-		assert!(b.end <= a.start);
-
-		let (buf_b, buf_a) = self.buf()?.split_at_mut(a.start);
-		Some((buf_a, &mut buf_b[b]))
+		self.buf().map(|buf| split_range_mut(buf, a, b))
 	}
 
 	/// Returns a pair of slices which contain the contents of the deque within
@@ -140,7 +157,7 @@ impl<const N: usize> BlockDeque<N> {
 
 	/// Removes the first element and returns it, or `None` if the deque is empty.
 	pub fn pop_front(&mut self) -> Option<u8> {
-		self.is_empty().then(|| {
+		(!self.is_empty()).then(|| {
 			let head = self.head;
 			self.head = self.wrap(1);
 			self.len -= 1;
@@ -150,7 +167,7 @@ impl<const N: usize> BlockDeque<N> {
 
 	/// Removes the last element and returns it, or `None` if the deque is empty.
 	pub fn pop_back(&mut self) -> Option<u8> {
-		self.is_empty().then(|| {
+		(!self.is_empty()).then(|| {
 			self.len -= 1;
 			self.buf[self.wrap(self.len)]
 		})
@@ -163,7 +180,10 @@ impl<const N: usize> BlockDeque<N> {
 
 		self.head = self.wrap_sub(1);
 		self.len += 1;
-		*self.index_mut(self.head)? = value;
+		let Some(front) = self.index_mut(self.head) else {
+			return Some(value)
+		};
+		*front = value;
 		None
 	}
 
@@ -171,38 +191,53 @@ impl<const N: usize> BlockDeque<N> {
 	/// full or shared.
 	pub fn push_back(&mut self, value: u8) -> Option<u8> {
 		if self.is_full() { return Some(value) }
-		*self.index_mut(self.wrap(self.head))? = value;
+		let Some(back) = self.index_mut(self.wrap(self.len)) else {
+			return Some(value)
+		};
+		*back = value;
 		self.len += 1;
 		None
 	}
 
 	/// Extends the deque with a slice `values`, returning the number of bytes
 	/// written, or `None` if the deque is not writable.
-	pub fn extend_n(&mut self, values: &[u8]) -> Option<usize> {
-		let (a, b) = self.slice_ranges(.., self.len);
-		let a_off = if b.is_empty() {
-			a.end // start + len
-		} else {
-			b.end // tail_len
-		};
+	pub fn extend_n(&mut self, mut values: &[u8]) -> Option<usize> {
+		if self.is_empty() {
+			let buf = self.buf()?;
+			let len = values.len().min(N);
+			buf[..len].copy_from_slice(&values[..len]);
+			self.head = 0;
+			self.len = len;
+			return Some(len)
+		}
 
-		let buf = self.buf()?;
-		let (empty_b, mut empty_a) = buf.split_at_mut(a.start);
-		empty_a = &mut empty_a[a_off..];
+		let head = self.head;
+		let mut count = 0;
 
-		let len_a = empty_a.len();
-		let len = if len_a > values.len() {
-			empty_a.copy_from_slice(&values[..len_a]);
-			len_a
-		} else {
-			let (src_a, src_b) = values.split_at(len_a);
-			empty_a.copy_from_slice(src_a);
-			empty_b[..src_a.len()].copy_from_slice(src_b);
-			len_a + src_a.len()
-		};
+		// Tail
+		let mut back_idx = self.wrap(self.len);
+		if back_idx > head {
+			let buf = self.buf()?;
+			let dst = &mut buf[back_idx..N];
+			let len = min(dst.len(), values.len());
+			dst[..len].copy_from_slice(&values[..len]);
+			values = &values[len..];
+			self.len += len;
+			count = len;
+		}
 
-		self.len += len;
-		Some(len)
+		// Head
+		back_idx = self.wrap(self.len);
+		if back_idx <= head {
+			let buf = self.buf()?;
+			let dst = &mut buf[back_idx..head];
+			let len = min(dst.len(), values.len());
+			dst[..len].copy_from_slice(&values[..len]);
+			self.len += len;
+			count += len;
+		}
+
+		Some(count)
 	}
 
 	/// Extends the deque with a slice `values`, returning the remaining slice, or
@@ -212,9 +247,12 @@ impl<const N: usize> BlockDeque<N> {
 	}
 
 	/// Drains the deque into a `target` slice, returning the number of bytes read.
-	pub fn drain_n(&mut self, target: &mut [u8]) -> usize {
-		target.copy_from_pair(self.as_slices());
-		let len = target.len();
+	pub fn drain_n(&mut self, mut target: &mut [u8]) -> usize {
+		let len = target.len().min(self.len);
+		let (a, b) = self.as_slices_in_range(..len);
+		target[..a.len()].copy_from_slice(a);
+		target = &mut target[a.len()..];
+		target[..b.len()].copy_from_slice(b);
 		self.remove_count(len);
 		len
 	}
@@ -257,7 +295,7 @@ impl<const N: usize> BlockDeque<N> {
 		let free = N - len;
 		let head_len = N - head;
 		let head_rng = head..head + head_len;
-		let tail = N - head_len;
+		let tail = len - head_len;
 		let tail_len = tail;
 
 		let buf = self.buf()?;
@@ -307,7 +345,7 @@ impl<const N: usize> BlockDeque<N> {
 	fn is_contiguous(&self) -> bool {
 		// Unlike with VecDeque, the capacity is checked by the compiler, so this
 		// cannot overflow.
-		self.head + self.len > N
+		self.head + self.len <= N
 	}
 
 	fn wrap(&self, idx: usize) -> usize {
@@ -411,3 +449,176 @@ impl<T> ExactSizeIterator for Iter<'_, T> {
 }
 
 impl<T> FusedIterator for Iter<'_, T> { }
+
+impl<const N: usize, T: AsRef<[u8]>> PartialEq<T> for BlockDeque<N> {
+	fn eq(&self, other: &T) -> bool {
+		let other = other.as_ref();
+		self.len == other.len() && self.iter().eq(other)
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use std::fmt;
+	use std::fmt::{Debug, Formatter};
+	use std::rc::Rc;
+	use quickcheck::{Arbitrary, Gen};
+	use quickcheck_macros::quickcheck;
+	use super::BlockDeque;
+
+	const SLICE: &[u8; 12] = b"Hello World!";
+
+	/// A generated deque with arbitrary offset and length, with its length within
+	/// the range set by [`MIN`] and [`MAX`].
+	struct TestDeque<const MIN: usize, const MAX: usize> {
+		deque: BlockDeque<12>,
+		len: usize
+	}
+
+	impl<const MIN: usize, const MAX: usize> TestDeque<MIN, MAX> {
+		fn new(off: usize, len: usize) -> Self {
+			let mut slice = *SLICE;
+			slice[len..].fill(0);
+			if len > 0 {
+				slice.rotate_right(off);
+			}
+			let mut deque = if len > 0 {
+				BlockDeque::from_array(slice)
+			} else {
+				BlockDeque::new()
+			};
+			deque.head = off;
+			deque.len  = len;
+			Self { deque, len }
+		}
+	}
+
+	impl<const MIN: usize, const MAX: usize> Clone for TestDeque<MIN, MAX> {
+		fn clone(&self) -> Self {
+			let mut deque = self.deque.clone();
+			Rc::make_mut(&mut deque.buf);
+			Self { deque, ..*self }
+		}
+	}
+
+	impl<const MIN: usize, const MAX: usize> Debug for TestDeque<MIN, MAX> {
+		fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+			struct Slice<'a>(&'a [u8]);
+
+			impl Debug for Slice<'_> {
+				fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+					f.debug_list().entries(self.0.iter()).finish()
+				}
+			}
+
+			let (a, b) = self.deque.as_slices();
+			f.debug_tuple("BlockDeque")
+			 .field(&Slice(a))
+			 .field(&Slice(b))
+			 .finish()
+		}
+	}
+
+	impl<const MIN: usize, const MAX: usize> Arbitrary for TestDeque<MIN, MAX> {
+		fn arbitrary(g: &mut Gen) -> Self {
+			let off = if MAX > 0 {
+				usize::arbitrary(g) % MAX
+			} else {
+				usize::arbitrary(g) % 12
+			};
+			let len = if MAX > 0 {
+				MIN + (usize::arbitrary(g) % (MAX + 1 - MIN))
+			} else {
+				0
+			};
+			Self::new(off, len)
+		}
+
+		fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+			let off = self.deque.head;
+			let len = self.deque.len;
+			Box::new(
+				(MIN..=len).rev().flat_map(move |len|
+					(0..off).rev().map(move |off| Self::new(off, len))
+				)
+			)
+		}
+	}
+
+	#[quickcheck]
+	fn push_front(TestDeque { mut deque, len }: TestDeque<0, 0>) {
+		assert_eq!(deque, &[]);
+
+		for (i, &b) in SLICE[len..].iter().rev().enumerate() {
+			assert_eq!(deque.push_front(b), None, "push byte {i}");
+			assert_eq!(deque, &SLICE[11 - i..], "byte {i}");
+		}
+
+		assert_eq!(deque.push_back(0), Some(0), "deque should be full but push was successful");
+	}
+
+	#[quickcheck]
+	fn push_back(TestDeque { mut deque, len }: TestDeque<0, 0>) {
+		assert_eq!(deque, &[]);
+
+		for (i, &b) in SLICE[len..].iter().enumerate() {
+			assert_eq!(deque.push_back(b), None, "push byte {i}");
+			assert_eq!(deque, &SLICE[..=len + i], "byte {i}");
+		}
+
+		assert_eq!(deque.push_back(0), Some(0), "deque should be full but push was successful");
+	}
+
+	#[quickcheck]
+	fn pop_front(TestDeque { mut deque, len }: TestDeque<12, 12>) {
+		for (i, &b) in SLICE[..len].iter().enumerate() {
+			assert_eq!(deque.pop_front(), Some(b), "pop byte {i}");
+		}
+	}
+
+	#[quickcheck]
+	fn pop_back(TestDeque { mut deque, len }: TestDeque<12, 12>) {
+		for (i, &b) in SLICE[..len].iter().rev().enumerate() {
+			assert_eq!(deque.pop_back(), Some(b), "pop byte {i}");
+		}
+	}
+
+	#[quickcheck]
+	fn share_read(TestDeque { deque: mut deque_a, len }: TestDeque<12, 12>) {
+		let mut deque_b = deque_a.clone();
+		for (i, &b) in SLICE[..len].iter().enumerate() {
+			assert_eq!(deque_a.pop_front(), Some(b), "pop byte {i} from shared deque A");
+			assert_eq!(deque_b.pop_front(), Some(b), "pop byte {i} from shared deque B");
+		}
+	}
+
+	#[quickcheck]
+	fn share_write(TestDeque { deque: mut deque_a, .. }: TestDeque<11, 11>) {
+		let mut deque_b = deque_a.clone();
+		assert_eq!(deque_a.push_back(0), Some(0), "pushing to shared deque should fail");
+		assert_eq!(deque_b.push_back(0), Some(0), "pushing to shared deque should fail");
+		drop(deque_b);
+		assert_eq!(deque_a.push_back(0), None, "pushing to previously shared deque should succeed");
+	}
+
+	#[quickcheck]
+	fn extend(TestDeque { mut deque, len }: TestDeque<0, 12>) {
+		let remaining = deque.extend(&SLICE[len..]);
+		assert_eq!(deque, SLICE);
+		assert_eq!(remaining, &[]);
+	}
+
+	#[quickcheck]
+	fn drain(TestDeque { mut deque, len }: TestDeque<1, 12>) {
+		let mut data = [0; 12];
+		let count = deque.drain_n(&mut data);
+		let data = &data[..count];
+		assert_eq!(data, &SLICE[..len]);
+		assert!(deque.is_empty());
+	}
+
+	#[quickcheck]
+	fn shift(TestDeque { mut deque, len }: TestDeque<1, 12>) {
+		assert_eq!(deque.shift().unwrap(), &SLICE[..len]);
+	}
+}

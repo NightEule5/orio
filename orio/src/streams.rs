@@ -313,6 +313,34 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 	#[inline]
 	fn read_i64_le(&mut self) -> Result<i64> { self.read_int_le() }
 
+	/// Reads a big-endian [`usize`]. To make streams consistent across platforms,
+	/// [`usize`] is fixed to the size of [`u64`] regardless of the target platform.
+	#[inline]
+	fn read_usize(&mut self) -> Result<usize> {
+		self.read_u64().map(|i| i as usize)
+	}
+
+	/// Reads a little-endian [`usize`]. To make streams consistent across platforms,
+	/// [`usize`] is fixed to the size of [`u64`] regardless of the target platform.
+	#[inline]
+	fn read_usize_le(&mut self) -> Result<usize> {
+		self.read_u64_le().map(|i| i as usize)
+	}
+
+	/// Reads a big-endian [`isize`]. To make streams consistent across platforms,
+	/// [`isize`] is fixed to the size of [`i64`] regardless of the target platform.
+	#[inline]
+	fn read_isize(&mut self) -> Result<isize> {
+		self.read_i64().map(|i| i as isize)
+	}
+
+	/// Reads a little-endian [`isize`]. To make streams consistent across platforms,
+	/// [`isize`] is fixed to the size of [`i64`] regardless of the target platform.
+	#[inline]
+	fn read_isize_le(&mut self) -> Result<isize> {
+		self.read_i64_le().map(|i| i as isize)
+	}
+
 	/// Reads a big-endian [`u128`].
 	#[inline]
 	fn read_u128(&mut self) -> Result<u128> { self.read_int() }
@@ -615,6 +643,34 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	/// Writes a little-endian [`i64`].
 	#[inline]
 	fn write_i64_le(&mut self, value: i64) -> Result { self.write_int_le(value) }
+
+	/// Writes a big-endian [`usize`]. To make streams consistent across platforms,
+	/// [`usize`] is fixed to the size of [`u64`] regardless of the target platform.
+	#[inline]
+	fn write_usize(&mut self, value: usize) -> Result {
+		self.write_u64(value as u64)
+	}
+
+	/// Writes a little-endian [`usize`]. To make streams consistent across platforms,
+	/// [`usize`] is fixed to the size of [`u64`] regardless of the target platform.
+	#[inline]
+	fn read_usize_le(&mut self, value: usize) -> Result {
+		self.write_u64_le(value as u64)
+	}
+
+	/// Writes a big-endian [`isize`]. To make streams consistent across platforms,
+	/// [`isize`] is fixed to the size of [`i64`] regardless of the target platform.
+	#[inline]
+	fn read_isize(&mut self, value: isize) -> Result {
+		self.write_i64(value as i64)
+	}
+
+	/// Writes a little-endian [`isize`]. To make streams consistent across platforms,
+	/// [`isize`] is fixed to the size of [`i64`] regardless of the target platform.
+	#[inline]
+	fn read_isize_le(&mut self, value: isize) -> Result {
+		self.write_i64_le(value as i64)
+	}
 
 	/// Writes a big-endian [`u128`].
 	#[inline]

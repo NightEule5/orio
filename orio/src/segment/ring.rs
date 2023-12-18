@@ -11,7 +11,7 @@ use super::Seg;
 
 /// A shareable, segmented ring buffer. Cloning shares segments in linear (`O(n)`)
 /// time.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct RBuf<T> {
 	buf: VecDeque<T>,
 	/// The number of readable segments in the buffer.
@@ -24,6 +24,62 @@ pub(crate) struct RBuf<T> {
 	count: usize,
 	/// The number of writable bytes in the buffer.
 	limit: usize,
+}
+
+impl<T> Default for RBuf<T> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl<'d, const N: usize> From<Vec<Seg<'d, N>>> for RBuf<Seg<'d, N>> {
+	fn from(buf: Vec<Seg<'d, N>>) -> Self {
+		// Tuple doesn't implement Sum.
+		#[derive(Default)]
+		struct SumPair(usize, usize);
+
+		impl std::iter::Sum for SumPair {
+			fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+				iter.reduce(|SumPair(acc_a, acc_b), SumPair(cur_a, cur_b)|
+					SumPair(acc_a + cur_a, acc_b + cur_b)
+				).unwrap_or_default()
+			}
+		}
+
+		assert!(
+			buf.iter().is_partitioned(Seg::is_not_empty),
+			"segment vector must be partitioned into non-empty and empty segments"
+		);
+		let len = buf.partition_point(Seg::is_not_empty);
+		let SumPair(count, size) = buf[..len].iter().map(|seg|
+			SumPair(seg.len(), seg.size())
+		).sum();
+		let mut limit = buf[len..].iter().map(Seg::limit).sum();
+		if len > 0 {
+			limit += buf[len - 1].limit();
+		}
+
+		Self {
+			buf: buf.into(),
+			len,
+			size,
+			count,
+			limit,
+		}
+	}
+}
+
+impl<T> RBuf<T> {
+	/// Creates a new, empty ring buffer.
+	pub const fn new() -> Self {
+		Self {
+			buf: VecDeque::new(),
+			len: 0,
+			size: 0,
+			count: 0,
+			limit: 0,
+		}
+	}
 }
 
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
@@ -225,6 +281,42 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	#[allow(dead_code)] // May be used later
 	pub fn as_mut_slices(&mut self) -> (&mut [Seg<'a, N>], &mut [Seg<'a, N>]) {
 		self.buf.as_mut_slices()
+	}
+
+	/// Splits slice segments into sub-segments of length `N` or shorter.
+	pub fn split_slice_segments(&mut self) {
+		let mut i = 0;
+		while i < self.len {
+			if let Some((chunks, remainder)) = self.buf[i].split_off_slice() {
+				let mut added = chunks.len();
+				if !remainder.is_empty() {
+					added += 1;
+				}
+				let chunks = chunks.iter().map(|chunk| Seg::from_slice(chunk));
+				let remainder = Seg::from_slice(remainder);
+
+				self.buf.reserve(added);
+				if i == self.buf.len() - 1 {
+					// We're at the end of the buffer, so use extend.
+					self.buf.extend(chunks);
+					if remainder.is_not_empty() {
+						self.buf.push_back(remainder);
+					}
+				} else {
+					// No easy way to insert an iterator, so: rotate, extend, rotate
+					// back.
+					self.buf.rotate_left(i);
+					self.buf.extend(chunks);
+					if remainder.is_not_empty() {
+						self.buf.push_back(remainder);
+					}
+					self.buf.rotate_right(i + added);
+					self.len += added;
+				}
+			}
+
+			i += 1;
+		}
 	}
 }
 

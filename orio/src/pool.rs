@@ -37,6 +37,11 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 	fn claim_one<'d>(&self) -> Result<Seg<'d, N>> {
 		Ok(self.try_borrow()?.claim_one())
 	}
+	
+	/// Claims a single segment, or allocates one if the pool cannot be borrowed.
+	fn claim_or_alloc_one<'d>(&self) -> Seg<'d, N> {
+		self.claim_one().unwrap_or_else(|_| Seg::default())
+	}
 
 	/// Claims `count` segments into `target`.
 	fn claim_count<'d>(&self, target: &mut impl Extend<Seg<'d, N>>, count: usize) -> Result {

@@ -175,28 +175,28 @@ impl<const N: usize> BlockDeque<N> {
 
 	/// Inserts `value` at the front of the deque, returning it if the deque is
 	/// full or shared.
-	pub fn push_front(&mut self, value: u8) -> Option<u8> {
-		if self.is_full() { return Some(value) }
+	pub fn push_front(&mut self, value: u8) -> Result<(), u8> {
+		if self.is_full() { return Err(value) }
 
 		self.head = self.wrap_sub(1);
 		self.len += 1;
 		let Some(front) = self.index_mut(self.head) else {
-			return Some(value)
+			return Err(value)
 		};
 		*front = value;
-		None
+		Ok(())
 	}
 
 	/// Inserts `value` at the back of the deque, returning it if the deque is
 	/// full or shared.
-	pub fn push_back(&mut self, value: u8) -> Option<u8> {
-		if self.is_full() { return Some(value) }
+	pub fn push_back(&mut self, value: u8) -> Result<(), u8> {
+		if self.is_full() { return Err(value) }
 		let Some(back) = self.index_mut(self.wrap(self.len)) else {
-			return Some(value)
+			return Err(value)
 		};
 		*back = value;
 		self.len += 1;
-		None
+		Ok(())
 	}
 
 	/// Extends the deque with a slice `values`, returning the number of bytes
@@ -550,11 +550,11 @@ mod test {
 		assert_eq!(deque, &[]);
 
 		for (i, &b) in SLICE[len..].iter().rev().enumerate() {
-			assert_eq!(deque.push_front(b), None, "push byte {i}");
+			assert_eq!(deque.push_front(b), Ok(()), "push byte {i}");
 			assert_eq!(deque, &SLICE[11 - i..], "byte {i}");
 		}
 
-		assert_eq!(deque.push_back(0), Some(0), "deque should be full but push was successful");
+		assert_eq!(deque.push_back(0), Err(0), "deque should be full but push was successful");
 	}
 
 	#[quickcheck]
@@ -562,11 +562,11 @@ mod test {
 		assert_eq!(deque, &[]);
 
 		for (i, &b) in SLICE[len..].iter().enumerate() {
-			assert_eq!(deque.push_back(b), None, "push byte {i}");
+			assert_eq!(deque.push_back(b), Ok(()), "push byte {i}");
 			assert_eq!(deque, &SLICE[..=len + i], "byte {i}");
 		}
 
-		assert_eq!(deque.push_back(0), Some(0), "deque should be full but push was successful");
+		assert_eq!(deque.push_back(0), Err(0), "deque should be full but push was successful");
 	}
 
 	#[quickcheck]
@@ -595,10 +595,10 @@ mod test {
 	#[quickcheck]
 	fn share_write(TestDeque { deque: mut deque_a, .. }: TestDeque<11, 11>) {
 		let mut deque_b = deque_a.clone();
-		assert_eq!(deque_a.push_back(0), Some(0), "pushing to shared deque should fail");
-		assert_eq!(deque_b.push_back(0), Some(0), "pushing to shared deque should fail");
+		assert_eq!(deque_a.push_back(0), Err(0), "pushing to shared deque should fail");
+		assert_eq!(deque_b.push_back(0), Err(0), "pushing to shared deque should fail");
 		drop(deque_b);
-		assert_eq!(deque_a.push_back(0), None, "pushing to previously shared deque should succeed");
+		assert_eq!(deque_a.push_back(0), Ok(()), "pushing to previously shared deque should succeed");
 	}
 
 	#[quickcheck]

@@ -10,8 +10,11 @@ use partial_utf8::*;
 
 use std::cmp::min;
 use std::{fmt, mem, slice};
+use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
+use all_asserts::assert_ge;
+use itertools::Itertools;
 use crate::pool::{DefaultPoolContainer, GetPool, Pool};
 use crate::{BufferResult as Result, pool, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
 use crate::BufferContext::{Clear, Compact, Copy, Read, Reserve, Resize};
@@ -95,7 +98,23 @@ impl<'d, const N: usize, P: GetPool<N>> Buffer<'d, N, P> {
 		Ok(buf)
 	}
 
-	/// Creates a new buffer containing `value` as UTF-8-encoded bytes. Shorthand
+	/// Creates a new buffer from a UTF-8 string without copying its contents.
+	/// Shorthand for:
+	///
+	/// ```no_run
+	/// use orio::Buffer;
+	/// use orio::streams::BufSink;
+	///
+	/// let mut buf = Buffer::default();
+	/// buf.push_utf8(value)?;
+	/// ```
+	pub fn from_utf8<T: AsRef<str> + ?Sized>(value: &'d T) -> Self {
+		let mut buf = Self::default();
+		buf.push_utf8(value.as_ref());
+		buf
+	}
+
+	/// Creates a new buffer from a slice without copying its contents. Shorthand
 	/// for:
 	///
 	/// ```no_run
@@ -103,33 +122,71 @@ impl<'d, const N: usize, P: GetPool<N>> Buffer<'d, N, P> {
 	/// use orio::streams::BufSink;
 	///
 	/// let mut buf = Buffer::default();
-	/// buf.write_utf8(value)?;
+	/// buf.push_slice(value)?;
 	/// ```
-	pub fn from_utf8<T: AsRef<str>>(value: &'d T) -> Result<Self> {
+	pub fn from_slice<T: AsRef<[u8]> + ?Sized>(value: &'d T) -> Self {
 		let mut buf = Self::default();
-		buf.write_utf8(value.as_ref())?;
-		Ok(buf)
+		buf.push_slice(value.as_ref());
+		buf
 	}
 
-	/// Creates a new buffer with `value`. Shorthand for:
-	///
-	/// ```no_run
-	/// use orio::Buffer;
-	/// use orio::streams::BufSink;
-	///
-	/// let mut buf = Buffer::default();
-	/// buf.write_from_slice(value)?;
-	/// ```
-	pub fn from_slice<T: AsRef<[u8]>>(value: &'d T) -> Result<Self> {
+	/// Creates a new buffer from an owned [`String`] without copying its contents.
+	pub fn from_utf8_owned(value: String) -> Self {
 		let mut buf = Self::default();
-		buf.write_from_slice(value.as_ref())?;
-		Ok(buf)
+		buf.push_utf8_owned(value);
+		buf
+	}
+
+	/// Creates a new buffer from a [`Vec`] without copying its contents.
+	pub fn from_vec(value: Vec<u8>) -> Self {
+		let mut buf = Self::default();
+		buf.push_vec(value);
+		buf
+	}
+
+	/// Creates a new buffer from a [`VecDeque`] without copying its contents.
+	pub fn from_deque(value: VecDeque<u8>) -> Self {
+		let mut buf = Self::default();
+		buf.push_deque(value);
+		buf
+	}
+}
+
+impl<'d> FromIterator<u8> for Buffer<'d> {
+	fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
+		let iter = iter.into_iter();
+		let capacity = match iter.size_hint() {
+			(_, Some(upper)) => upper,
+			(lower, None) => lower
+		};
+		let mut data = Vec::with_capacity(capacity);
+		let mut pool = DefaultPoolContainer::get();
+
+		fn claim_or_create(
+			data: &mut Vec<Seg>,
+			pool: &mut DefaultPoolContainer
+		) {
+			if data.last().is_some_and(|seg| !seg.is_full()) {
+				return
+			}
+
+			let seg = pool.claim_one().unwrap_or_else(|_| Seg::default());
+			data.push(seg);
+		}
+
+		for byte in iter {
+			claim_or_create(&mut data, &mut pool);
+			let seg = data.last_mut().expect("a segment should have been claimed");
+			seg.push(byte).expect("claimed or created segment should be writable");
+		}
+
+		Self::new_buf(pool, data, BufferOptions::default())
 	}
 }
 
 impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	/// Creates a new buffer.
-	pub fn new(
+	pub const fn new(
 		pool: P,
 		BufferOptions {
 			share_threshold,
@@ -137,10 +194,35 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		}: BufferOptions
 	) -> Self {
 		Self {
-			data: RBuf::default(),
+			data: RBuf::new(),
 			pool,
 			share_threshold,
 			compact_threshold,
+		}
+	}
+
+	/// Creates a new buffer with `data` as its internal ring buffer.
+	fn new_buf(
+		pool: P,
+		data: impl Into<RBuf<Seg<'d, N>>>,
+		BufferOptions {
+			share_threshold,
+			compact_threshold
+		}: BufferOptions
+	) -> Self {
+		Self {
+			pool,
+			data: data.into(),
+			share_threshold,
+			compact_threshold,
+		}
+	}
+
+	/// Returns the options used to create the buffer.
+	pub fn options(&self) -> BufferOptions {
+		BufferOptions {
+			share_threshold: self.share_threshold,
+			compact_threshold: self.compact_threshold,
 		}
 	}
 
@@ -152,6 +234,50 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	pub fn is_empty(&self) -> bool { self.data.is_empty() }
 	/// Returns `true` if the buffer is not empty.
 	pub fn is_not_empty(&self) -> bool { !self.data.is_empty() }
+
+	/// Consumes the buffer, creating a new one with identical contents, but with
+	/// borrowed data written to owned segments. The new buffer is "detached" from
+	/// the original buffer's lifetime, allowing it to outlive previously borrowed
+	/// data. This is useful when creating a buffer from a slice (i.e. [`from_utf8`]
+	/// or [`from_slice`]), where the borrowed data falls out of scope.
+	///
+	/// For example, this doesn't compile:
+	/// ```no_run
+	/// fn buf<'a, 'b>(data: &'b str) -> orio::Buffer<'a> {
+	/// 	orio::Buffer::from_utf8(data) // lifetime may not live long enough
+	/// }
+	/// ```
+	///
+	/// To make the above compile, the buffer lifetime must be detached from the slice
+	/// lifetime, by writing its data into owned segments:
+	/// ```no_run
+	/// use orio::streams::{BufSink, Result};
+	/// fn buf<'a, 'b>(data: &'b str) -> Result<orio::Buffer<'a>> {
+	/// 	let mut buf = orio::Buffer::default();
+	/// 	buf.write_utf8(data)?;
+	/// 	Ok(buf)
+	/// }
+	/// ```
+	///
+	/// Or, using `detached`:
+	/// ```no_run
+	/// fn buf<'a, 'b>(data: &'b str) -> orio::Buffer<'a> {
+	/// 	orio::Buffer::from_utf8(data).detached()
+	/// }
+	/// ```
+	///
+	/// [`from_utf8`]: Buffer::from_utf8
+	/// [`from_slice`]: Buffer::from_slice
+	pub fn detached<'de>(mut self) -> Buffer<'de, N, P> {
+		let data = {
+			let Self { data, pool, .. } = &mut self;
+			data.split_slice_segments();
+			data.drain(data.len())
+				.map(|seg| seg.detach(pool))
+				.collect_vec()
+		};
+		Buffer::new_buf(self.pool.clone(), data, self.options())
+	}
 
 	/// Clears data from the buffer.
 	pub fn clear(&mut self) -> Result {

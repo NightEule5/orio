@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::VecDeque;
 use crate::{Buffer, BufferResult, ResultContext, Seg, StreamResult as Result};
 use crate::BufferContext::Drain;
 use crate::streams::{BufSink, BufSource, Sink};
@@ -23,7 +24,24 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	///
 	/// [`write_from_slice`]: Buffer::write_from_slice
 	pub fn push_slice(&mut self, value: &'d [u8]) {
-		self.data.push_back(value.into());
+		self.push_segment(Seg::from_slice(value));
+	}
+	
+	pub fn push_utf8_owned(&mut self, value: String) {
+		self.push_segment(value.into())
+	}
+	
+	pub fn push_vec(&mut self, value: Vec<u8>) {
+		self.push_segment(value.into())
+	}
+	
+	pub fn push_deque(&mut self, value: VecDeque<u8>) {
+		self.push_segment(value.into())
+	}
+
+	/// Pushes a segment to the buffer.
+	pub fn push_segment(&mut self, value: Seg<'d, N>) {
+		self.data.push_back(value);
 	}
 }
 

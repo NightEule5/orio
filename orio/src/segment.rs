@@ -10,10 +10,12 @@ pub(crate) use ring::*;
 use std::cmp::min;
 use std::ops::{Index, RangeBounds};
 use std::{mem, slice};
+use all_asserts::assert_gt;
 use block_deque::BlockDeque;
 pub(crate) use block_deque::buf as alloc_block;
 use buffer::Buf;
 use util::SliceExt;
+use crate::pool::Pool;
 
 pub const SIZE: usize = 8192;
 
@@ -39,6 +41,11 @@ impl<'d, const N: usize, T: Into<Buf<'d, N>>> From<T> for Seg<'d, N> {
 }
 
 impl<'d, const N: usize> Seg<'d, N> {
+	/// Creates a segment containing `slice`.
+	pub const fn from_slice(slice: &'d [u8]) -> Self {
+		Self(Buf::Slice(slice))
+	}
+
 	/// Returns the number of bytes in the segment.
 	pub fn len(&self) -> usize { self.0.len() }
 	/// Returns the number of bytes that can be written to the segment.
@@ -221,6 +228,28 @@ impl<'d, const N: usize> Seg<'d, N> {
 		}
 	}
 
+	/// Pushes `value` to the back of the segment, returning it if the segment is
+	/// not writable or full.
+	pub fn push(&mut self, value: u8) -> Result<(), u8> {
+		match &mut self.0 {
+			Buf::Block(block) => block.push_back(value),
+			Buf::Boxed(boxed) => {
+				boxed.impose();
+				let Some(target) = boxed.buf() else {
+					return Err(value)
+				};
+				if target.capacity() - target.len() > 0 {
+					target.push_back(value);
+					boxed.len += 1;
+					Ok(())
+				} else {
+					Err(value)
+				}
+			}
+			Buf::Slice(_) => Err(value)
+		}
+	}
+
 	/// Shares the segment's contents within `range`.
 	pub fn share<R: RangeBounds<usize>>(&self, range: R) -> Seg<'d, N> {
 		let range = slice::range(range, ..self.len());
@@ -232,6 +261,42 @@ impl<'d, const N: usize> Seg<'d, N> {
 
 	/// Shares the segment's contents.
 	pub fn share_all(&self) -> Seg<'d, N> { self.clone() }
+
+	/// Consumes the segment, creating a new segment without borrowed data. Shared
+	/// data is left alone. Panics if the segment is larger than the block size.
+	pub(crate) fn detach<'de>(
+		self,
+		pool: &impl Pool<N>
+	) -> Seg<'de, N> {
+		match self {
+			Self(Buf::Block(block)) => Seg(Buf::Block(block)),
+			Self(Buf::Boxed(boxed)) => Seg(Buf::Boxed(boxed)),
+			Self(Buf::Slice(slice)) => {
+				assert_gt!(slice.len(), N);
+				let mut target = pool.claim_or_alloc_one();
+				assert_eq!(
+					target.write(slice).expect("claimed or allocated segment should be writable"),
+					slice.len()
+				);
+				target
+			}
+		}
+	}
+
+	/// Splits a slice segment off into slices of length `N` or shorter.
+	pub(crate) fn split_off_slice(&mut self) -> Option<(&'d [[u8; N]], &'d [u8])> {
+		if let Self(Buf::Slice(slice)) = self {
+			if slice.len() > N {
+				let (chunks, remainder) = slice.as_chunks();
+				*slice = &chunks[0];
+				Some((&chunks[1..], remainder))
+			} else {
+				None
+			}
+		} else {
+			None
+		}
+	}
 
 	/// Consumes the segment and returns its inner block of memory, if any. This is
 	/// intended for use by pool implementations to collect only blocks and discard

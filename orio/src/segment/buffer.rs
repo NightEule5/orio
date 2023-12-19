@@ -2,14 +2,14 @@
 
 use std::borrow::Cow;
 use std::cmp::min;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, vec_deque::Iter as DequeIter};
 use std::{fmt, slice};
 use std::ops::RangeBounds;
 use std::rc::Rc;
 use super::block_deque::BlockDeque;
 
 /// A segment buffer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq)]
 pub enum Buf<'d, const N: usize> {
 	/// A fixed-size segment buffer. This is used by default.
 	Block(BlockDeque<N>),
@@ -21,7 +21,7 @@ pub enum Buf<'d, const N: usize> {
 	Slice(&'d [u8]),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq)]
 pub struct BoxedBuf {
 	pub buf: Rc<VecDeque<u8>>,
 	pub off: usize,
@@ -97,6 +97,10 @@ impl BoxedBuf {
 	pub fn buf(&mut self) -> Option<&mut VecDeque<u8>> {
 		Rc::get_mut(&mut self.buf)
 	}
+
+	pub fn iter(&self) -> DequeIter<u8> {
+		self.buf.iter()
+	}
 }
 
 impl fmt::Debug for BoxedBuf {
@@ -125,6 +129,35 @@ impl<const N: usize> Buf<'_, N> {
 			Buf::Block(block) if !block.is_shared() => block.limit(),
 			Buf::Boxed(boxed) if !boxed.is_shared() => boxed.buf.capacity() - boxed.len,
 			_ => 0
+		}
+	}
+
+	pub fn iter(&self) -> impl Iterator<Item = &u8> + '_ {
+		use super::block_deque::Iter as BlockIter;
+		use slice::Iter as SliceIter;
+
+		enum Iter<'a> {
+			Block(BlockIter<'a, u8>),
+			Boxed(DequeIter<'a, u8>),
+			Slice(SliceIter<'a, u8>)
+		}
+
+		impl<'a> Iterator for Iter<'a> {
+			type Item = &'a u8;
+
+			fn next(&mut self) -> Option<&'a u8> {
+				match self {
+					Self::Block(iter) => iter.next(),
+					Self::Boxed(iter) => iter.next(),
+					Self::Slice(iter) => iter.next()
+				}
+			}
+		}
+
+		match self {
+			Self::Block(block) => Iter::Block(block.iter()),
+			Self::Boxed(boxed) => Iter::Boxed(boxed.iter()),
+			Self::Slice(slice) => Iter::Slice(slice.iter())
 		}
 	}
 }
@@ -211,5 +244,44 @@ impl<'a, const N: usize, T: bytemuck::NoUninit> From<&'a [T]> for Buf<'a , N> {
 impl<'a, const N: usize> From<&'a bytes::Bytes> for Buf<'a, N> {
 	fn from(value: &'a bytes::Bytes) -> Self {
 		value.as_ref().into()
+	}
+}
+
+impl<const N: usize, const O: usize> PartialEq<Buf<'_, O>> for Buf<'_, N> {
+	fn eq(&self, other: &Buf<'_, O>) -> bool {
+		match (self, other) {
+			(Buf::Block(block), &Buf::Slice(other)) => block == other,
+			(Buf::Boxed(boxed), &Buf::Slice(other)) => boxed == other,
+			(Buf::Slice(slice), Buf::Slice(other)) => slice == other,
+			(buf_a, buf_b) if buf_a.len() == buf_b.len() =>
+				buf_a.iter().eq(buf_b.iter()),
+			_ => false
+		}
+	}
+}
+
+impl<const N: usize> PartialEq<[u8]> for Buf<'_, N> {
+	fn eq(&self, other: &[u8]) -> bool {
+		match self {
+			Buf::Block(block) => block == other,
+			Buf::Boxed(boxed) => boxed == other,
+			&Buf::Slice(slice) => slice == other,
+		}
+	}
+}
+
+impl PartialEq for BoxedBuf {
+	fn eq(&self, other: &Self) -> bool {
+		self.len == other.len &&
+		self.iter().eq(other.iter())
+	}
+}
+
+impl PartialEq<[u8]> for BoxedBuf {
+	fn eq(&self, other: &[u8]) -> bool {
+		let (a, b) = self.as_slices();
+		self.len == other.len() &&
+		a == &other[..a.len()] &&
+		b == &other[a.len()..]
 	}
 }

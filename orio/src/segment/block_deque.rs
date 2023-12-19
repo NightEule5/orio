@@ -17,7 +17,7 @@ use std::rc::Rc;
 /// data or modify existing data.
 ///
 /// [`VecDeque`]: std::collections::VecDeque
-#[derive(Clone)]
+#[derive(Clone, Eq)]
 pub struct BlockDeque<const N: usize> {
 	buf: Rc<Box<[u8; N]>>,
 	head: usize,
@@ -450,10 +450,22 @@ impl<T> ExactSizeIterator for Iter<'_, T> {
 
 impl<T> FusedIterator for Iter<'_, T> { }
 
+impl<const N: usize> PartialEq<[u8]> for BlockDeque<N> {
+	fn eq(&self, other: &[u8]) -> bool {
+		self.len == other.len() && self.iter().eq(other)
+	}
+}
+
 impl<const N: usize, T: AsRef<[u8]>> PartialEq<T> for BlockDeque<N> {
 	fn eq(&self, other: &T) -> bool {
-		let other = other.as_ref();
-		self.len == other.len() && self.iter().eq(other)
+		self == other.as_ref()
+	}
+}
+
+impl<const N: usize, const O: usize> PartialEq<BlockDeque<O>> for BlockDeque<N> {
+	fn eq(&self, other: &BlockDeque<O>) -> bool {
+		self.len() == other.len() &&
+		self.iter().eq(other.iter())
 	}
 }
 

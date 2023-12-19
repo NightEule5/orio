@@ -33,7 +33,7 @@ pub const SIZE: usize = 8192;
 /// be claimed from the segment [pool](super::pool), and collected into it when
 /// finished. It's not recommended to let a segment drop instead of collecting it,
 /// unless you're sure it contains shared data.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq)]
 pub struct Seg<'d, const N: usize = SIZE>(Buf<'d, N>);
 
 impl<'d, const N: usize, T: Into<Buf<'d, N>>> From<T> for Seg<'d, N> {
@@ -354,6 +354,24 @@ impl<'d, const N: usize> Seg<'d, N> {
 			}
 			Buf::Slice(slice) => *slice = &slice[..count],
 		}
+	}
+}
+
+impl<const N: usize, const O: usize> PartialEq<Seg<'_, O>> for Seg<'_, N> {
+	fn eq(&self, other: &Seg<'_, O>) -> bool {
+		self.0 == other.0
+	}
+}
+
+impl<const N: usize> PartialEq<[u8]> for Seg<'_, N> {
+	fn eq(&self, other: &[u8]) -> bool {
+		&self.0 == other
+	}
+}
+
+impl<const N: usize, T: AsRef<[u8]>> PartialEq<T> for Seg<'_, N> {
+	fn eq(&self, other: &T) -> bool {
+		self == other.as_ref()
 	}
 }
 

@@ -28,7 +28,7 @@ pub type DefaultBuffer<'d> = Buffer<'d>;
 
 /// A dynamically-resizing byte buffer which borrows and returns pool memory as
 /// needed.
-#[derive(Clone)]
+#[derive(Clone, Eq)]
 pub struct Buffer<
 	'd,
 	const N: usize = 8192,
@@ -653,4 +653,31 @@ impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {
 
 	/// Returns `0`.
 	fn seek_pos(&mut self) -> StreamResult<usize> { Ok(0) }
+}
+
+impl<const N: usize, Pa: Pool<N>, const O: usize, Pb: Pool<O>> PartialEq<Buffer<'_, O, Pb>> for Buffer<'_, N, Pa> {
+	fn eq(&self, other: &Buffer<'_, O, Pb>) -> bool {
+		self.data.iter().eq(other.data.iter())
+	}
+}
+
+impl<const N: usize, P: Pool<N>> PartialEq<[u8]> for Buffer<'_, N, P> {
+	fn eq(&self, mut other: &[u8]) -> bool {
+		if self.count() != other.len() {
+			return false
+		}
+
+		self.data.iter().all(move |seg| {
+			assert_ge!(other.len(), seg.len());
+			let cur = &other[..seg.len()];
+			other = &other[seg.len()..];
+			seg == cur
+		})
+	}
+}
+
+impl<const N: usize, P: Pool<N>, T: AsRef<[u8]>> PartialEq<T> for Buffer<'_, N, P> {
+	fn eq(&self, other: &T) -> bool {
+		self == other.as_ref()
+	}
 }

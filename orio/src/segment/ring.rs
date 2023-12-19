@@ -11,7 +11,7 @@ use super::Seg;
 
 /// A shareable, segmented ring buffer. Cloning shares segments in linear (`O(n)`)
 /// time.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq)]
 pub(crate) struct RBuf<T> {
 	buf: VecDeque<T>,
 	/// The number of readable segments in the buffer.
@@ -263,16 +263,6 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		self.drain_empty(self.capacity() - self.len)
 	}
 
-	/// Iterates over written segments.
-	pub fn iter(&self) -> impl Iterator<Item = &Seg<'a, N>> + '_ {
-		self.buf.iter().take(self.len)
-	}
-
-	/// Iterates mutably over written segments.
-	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Seg<'a, N>> + '_ {
-		self.buf.iter_mut().take(self.len)
-	}
-
 	/// Returns a pair of slices which contain the buffer segments, in order, with
 	/// written segments at the front and empty segments at the back. Using these
 	/// may invalidate the buffer, and must be followed by [`invalidate`].
@@ -317,6 +307,18 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 			i += 1;
 		}
+	}
+}
+
+impl<T> RBuf<T> {
+	/// Iterates over written segments.
+	pub fn iter(&self) -> impl Iterator<Item = &T> + '_ {
+		self.buf.iter().take(self.len)
+	}
+
+	/// Iterates mutably over written segments.
+	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
+		self.buf.iter_mut().take(self.len)
 	}
 }
 
@@ -432,5 +434,11 @@ impl<T> IndexMut<usize> for RBuf<T> {
 	/// [`invalidate`]: Self::invalidate
 	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
 		&mut self.buf[index]
+	}
+}
+
+impl<T: PartialEq> PartialEq for RBuf<T> {
+	fn eq(&self, other: &Self) -> bool {
+		self.iter().eq(other.iter())
 	}
 }

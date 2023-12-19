@@ -30,6 +30,9 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 	type Pool: MutPool<N> + ?Sized;
 	type Ref<'p>: DerefMut<Target = Self::Pool> where Self: 'p;
 
+	/// Gets a shared reference to the pool.
+	fn get() -> Self;
+
 	/// Borrows the pool mutably, locking it for the duration of the borrow.
 	fn try_borrow(&self) -> Result<Self::Ref<'_>>;
 
@@ -79,11 +82,6 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 	}
 }
 
-pub trait GetPool<const N: usize = SIZE>: Pool<N> {
-	/// Gets a shared reference to the pool.
-	fn get() -> Self;
-}
-
 /// A mutably-borrowed pool, usually from a [`RefCell`].
 ///
 /// Note on object-safety: this trait is object-safe for single-segment operations,
@@ -131,67 +129,31 @@ pub trait MutPool<const N: usize = SIZE> {
 #[derive(Default)]
 pub struct DefaultPool(Vec<Box<[u8; SIZE]>>);
 
-pub struct PoolContainer<const N: usize, P>(Rc<RefCell<P>>)
-where P: MutPool<N> + ?Sized;
-
-impl<const N: usize, P> From<Rc<RefCell<P>>> for PoolContainer<N, P>
-	where P: MutPool<N> + ?Sized {
-	fn from(pool: Rc<RefCell<P>>) -> Self {
-		Self(pool)
-	}
-}
-
-impl<const N: usize, P> From<RefCell<P>> for PoolContainer<N, P>
-	where P: MutPool<N> + Sized {
-	fn from(pool: RefCell<P>) -> Self {
-		Rc::new(pool).into()
-	}
-}
-
-impl<const N: usize, P> From<P> for PoolContainer<N, P>
-	where P: MutPool<N> + Sized {
-	fn from(pool: P) -> Self {
-		RefCell::new(pool).into()
-	}
-}
+#[derive(Clone)]
+pub struct DefaultPoolContainer(Rc<RefCell<DefaultPool>>);
 
 impl Default for DefaultPoolContainer {
 	fn default() -> Self {
-		DefaultPool::default().into()
+		Self(Rc::new(DefaultPool::default().into()))
 	}
 }
 
-impl<const N: usize, P> Clone for PoolContainer<N, P>
-	where P: MutPool<N> + ?Sized {
-	fn clone(&self) -> Self {
-		self.0.clone().into()
-	}
-}
-
-impl<const N: usize, P> Pool<N> for PoolContainer<N, P>
-where P: MutPool<N> + ?Sized,
-	  for<'p> P: 'p {
-	type Pool = P;
-	type Ref<'p> = RefMut<'p, P>;
+impl Pool<SIZE> for DefaultPoolContainer {
+	type Pool = DefaultPool;
+	type Ref<'p> = RefMut<'p, DefaultPool>;
+	fn get() -> Self { pool() }
 
 	fn try_borrow(&self) -> Result<Self::Ref<'_>> {
 		Ok(self.0.try_borrow_mut()?)
 	}
 }
 
-pub(crate) type DefaultPoolContainer = PoolContainer<SIZE, DefaultPool>;
-
 /// Clones a shared reference to the default segment pool.
 #[inline]
 pub fn pool() -> DefaultPoolContainer { POOL.clone() }
 
 #[thread_local]
-static POOL: Lazy<DefaultPoolContainer> = Lazy::new(PoolContainer::default);
-
-impl GetPool<SIZE> for DefaultPoolContainer {
-	#[inline]
-	fn get() -> Self { pool() }
-}
+static POOL: Lazy<DefaultPoolContainer> = Lazy::new(DefaultPoolContainer::default);
 
 impl MutPool for DefaultPool {
 	fn claim_reserve(&mut self, mut count: usize) {

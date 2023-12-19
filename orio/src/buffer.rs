@@ -15,7 +15,7 @@ use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
 use all_asserts::assert_ge;
 use itertools::Itertools;
-use crate::pool::{DefaultPoolContainer, GetPool, Pool};
+use crate::pool::{DefaultPoolContainer, Pool};
 use crate::{BufferResult as Result, pool, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
 use crate::BufferContext::{Clear, Compact, Copy, Read, Reserve, Resize};
 use crate::segment::RBuf;
@@ -23,6 +23,8 @@ use crate::streams::{BufSink, BufStream, Seekable, SeekOffset, Stream};
 
 // Todo: track how much space is reserved to keep empty segments after resize-on-read.
 // Todo: remove compacting?
+
+pub type DefaultBuffer<'d> = Buffer<'d>;
 
 /// A dynamically-resizing byte buffer which borrows and returns pool memory as
 /// needed.
@@ -38,11 +40,11 @@ pub struct Buffer<
 	compact_threshold: usize,
 }
 
-impl<const N: usize, P: GetPool<N>> Default for Buffer<'_, N, P> {
+impl<const N: usize, P: Pool<N>> Default for Buffer<'_, N, P> {
 	fn default() -> Self { BufferOptions::default().into() }
 }
 
-impl<const N: usize, P: GetPool<N>> From<BufferOptions> for Buffer<'_, N, P> {
+impl<const N: usize, P: Pool<N>> From<BufferOptions> for Buffer<'_, N, P> {
 	fn from(options: BufferOptions) -> Self {
 		Self::new(P::get(), options)
 	}
@@ -64,7 +66,7 @@ impl<const N: usize, P: Pool<N>> Debug for Buffer<'_, N, P> {
 	}
 }
 
-impl<'d, const N: usize, P: GetPool<N>> Buffer<'d, N, P> {
+impl<'d> Buffer<'d> {
 	/// Creates a new "lean" buffer. See [`BufferOptions::lean`] for details.
 	pub fn lean() -> Self { BufferOptions::lean().into() }
 	

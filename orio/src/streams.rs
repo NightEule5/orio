@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::result;
 use std::str::pattern::{Pattern, Searcher, SearchStep};
 use num_traits::PrimInt;
-use crate::pool::{GetPool, Pool};
+use crate::pool::Pool;
 
 mod seeking;
 mod void;
@@ -107,13 +107,13 @@ pub trait Source<'d, const N: usize = SIZE>: Stream<N> {
 	}
 }
 
-pub trait SourceExt<'d, const N: usize, P: GetPool<N>>: Source<'d, N> + Sized {
+pub trait SourceExt<'d, const N: usize, P: Pool<N>>: Source<'d, N> + Sized {
 	fn buffered(self) -> BufferedSource<'d, N, Self, P> {
 		BufferedSource::new(self, Buffer::default())
 	}
 }
 
-impl<'d, const N: usize, S: Source<'d, N>, P: GetPool<N>> SourceExt<'d, N, P> for S { }
+impl<'d, const N: usize, S: Source<'d, N>, P: Pool<N>> SourceExt<'d, N, P> for S { }
 
 pub trait Sink<'d, const N: usize = SIZE>: Stream<N> {
 	/// Drains a buffer by writing up to `count` bytes into the sink, returning the
@@ -143,13 +143,13 @@ pub trait Sink<'d, const N: usize = SIZE>: Stream<N> {
 	fn flush(&mut self) -> Result { Ok(()) }
 }
 
-pub trait SinkExt<'d, const N: usize, P: GetPool<N>>: Sink<'d, N> + Sized {
+pub trait SinkExt<'d, const N: usize, P: Pool<N>>: Sink<'d, N> + Sized {
 	fn buffered(self) -> BufferedSink<'d, N, Self, P> {
 		BufferedSink::new(self, Buffer::default())
 	}
 }
 
-impl<'d, const N: usize, S: Sink<'d, N>, P: GetPool<N>> SinkExt<'d, N, P> for S { }
+impl<'d, const N: usize, S: Sink<'d, N>, P: Pool<N>> SinkExt<'d, N, P> for S { }
 
 pub trait BufStream<'d, const N: usize = SIZE>: Stream<N> {
 	type Pool: Pool<N>;

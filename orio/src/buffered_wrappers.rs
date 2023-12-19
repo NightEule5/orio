@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Buffer, BufferOptions, BufferResult, Error, ResultContext, StreamResult};
+use crate::{Buffer, BufferResult, DefaultBuffer, Error, ResultContext, StreamResult};
 use crate::BufferContext::{Drain, Fill};
 use crate::error::Context;
-use crate::pool::{GetPool, Pool};
+use crate::pool::Pool;
 use crate::streams::{Sink, Source, BufStream, BufSource, BufSink, Seekable, SeekOffset, Stream, SeekableExt};
 use crate::StreamContext::{Flush, Read, Seek, Write};
 
@@ -163,7 +163,7 @@ impl<'d, const N: usize, S: Source<'d, N>, P: Pool<N>> BufSource<'d, N> for Buff
 	}
 }
 
-impl<'d, const N: usize, S: Source<'d, N> + Seekable, P: GetPool<N>> BufferedSource<'d, N, S, P> {
+impl<'d, const N: usize, S: Source<'d, N> + Seekable, P: Pool<N>> BufferedSource<'d, N, S, P> {
 	fn seek_back_buf(&mut self, off: usize) -> StreamResult<usize> {
 		let cur_pos = self.seek_pos()?;
 		let new_pos = self.source.seek_back(off)?;
@@ -173,9 +173,7 @@ impl<'d, const N: usize, S: Source<'d, N> + Seekable, P: GetPool<N>> BufferedSou
 			return Ok(new_pos)
 		}
 
-		let mut seek_buf: Buffer<N, P> = BufferOptions::default()
-			.set_compact_threshold(usize::MAX)
-			.into();
+		let mut seek_buf = DefaultBuffer::default();
 		self.source
 			.fill(&mut seek_buf, count)
 			.context(Seek)?;
@@ -191,7 +189,7 @@ impl<'d, const N: usize, S: Source<'d, N> + Seekable, P: GetPool<N>> BufferedSou
 	}
 }
 
-impl<'d, const N: usize, S: Source<'d, N> + Seekable, P: GetPool<N>> Seekable for BufferedSource<'d, N, S, P> {
+impl<'d, const N: usize, S: Source<'d, N> + Seekable, P: Pool<N>> Seekable for BufferedSource<'d, N, S, P> {
 	fn seek(&mut self, offset: SeekOffset) -> StreamResult<usize> {
 		return match offset {
 			SeekOffset::Forward(0) |

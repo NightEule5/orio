@@ -654,21 +654,21 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	/// Writes a little-endian [`usize`]. To make streams consistent across platforms,
 	/// [`usize`] is fixed to the size of [`u64`] regardless of the target platform.
 	#[inline]
-	fn read_usize_le(&mut self, value: usize) -> Result {
+	fn write_usize_le(&mut self, value: usize) -> Result {
 		self.write_u64_le(value as u64)
 	}
 
 	/// Writes a big-endian [`isize`]. To make streams consistent across platforms,
 	/// [`isize`] is fixed to the size of [`i64`] regardless of the target platform.
 	#[inline]
-	fn read_isize(&mut self, value: isize) -> Result {
+	fn write_isize(&mut self, value: isize) -> Result {
 		self.write_i64(value as i64)
 	}
 
 	/// Writes a little-endian [`isize`]. To make streams consistent across platforms,
 	/// [`isize`] is fixed to the size of [`i64`] regardless of the target platform.
 	#[inline]
-	fn read_isize_le(&mut self, value: isize) -> Result {
+	fn write_isize_le(&mut self, value: isize) -> Result {
 		self.write_i64_le(value as i64)
 	}
 

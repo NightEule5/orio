@@ -57,9 +57,7 @@ impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 			sink.data.push_back(partial);
 		}
 
-		let self_tidy = self.resize();
-		let sink_tidy = sink.check_compact();
-		self_tidy.and(sink_tidy).set_context(Fill)?;
+		self.resize().set_context(Fill)?;
 		Ok(count)
 	}
 

@@ -10,19 +10,17 @@ use partial_utf8::*;
 
 use std::cmp::min;
 use std::{fmt, mem, slice};
-use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
 use std::ops::RangeBounds;
 use all_asserts::assert_ge;
 use itertools::Itertools;
-use crate::pool::{DefaultPoolContainer, Pool};
-use crate::{BufferResult as Result, pool, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
-use crate::BufferContext::{Clear, Compact, Copy, Read, Reserve, Resize};
+use crate::pool::{DefaultPoolContainer, Pool, pool};
+use crate::{BufferResult as Result, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
+use crate::BufferContext::{Clear, Copy, Read, Reserve, Resize};
 use crate::segment::RBuf;
 use crate::streams::{BufSink, BufStream, Seekable, SeekOffset, Stream};
 
 // Todo: track how much space is reserved to keep empty segments after resize-on-read.
-// Todo: remove compacting?
 
 pub type DefaultBuffer<'d> = Buffer<'d>;
 
@@ -37,7 +35,8 @@ pub struct Buffer<
 	data: RBuf<Seg<'d, N>>,
 	pool: P,
 	share_threshold: usize,
-	compact_threshold: usize,
+	borrow_threshold: usize,
+	allocation: Allocate,
 }
 
 impl<const N: usize, P: Pool<N>> Default for Buffer<'_, N, P> {
@@ -61,7 +60,8 @@ impl<const N: usize, P: Pool<N>> Debug for Buffer<'_, N, P> {
 		f.debug_struct("Buffer")
 			.field("data", &self.data)
 			.field("share_threshold", &self.share_threshold)
-			.field("compact_threshold", &self.compact_threshold)
+			.field("borrow_threshold", &self.borrow_threshold)
+			.field("allocation", &self.allocation)
 			.finish_non_exhaustive()
 	}
 }
@@ -131,27 +131,6 @@ impl<'d> Buffer<'d> {
 		buf.push_slice(value.as_ref());
 		buf
 	}
-
-	/// Creates a new buffer from an owned [`String`] without copying its contents.
-	pub fn from_utf8_owned(value: String) -> Self {
-		let mut buf = Self::default();
-		buf.push_utf8_owned(value);
-		buf
-	}
-
-	/// Creates a new buffer from a [`Vec`] without copying its contents.
-	pub fn from_vec(value: Vec<u8>) -> Self {
-		let mut buf = Self::default();
-		buf.push_vec(value);
-		buf
-	}
-
-	/// Creates a new buffer from a [`VecDeque`] without copying its contents.
-	pub fn from_deque(value: VecDeque<u8>) -> Self {
-		let mut buf = Self::default();
-		buf.push_deque(value);
-		buf
-	}
 }
 
 impl<'d> FromIterator<u8> for Buffer<'d> {
@@ -161,23 +140,21 @@ impl<'d> FromIterator<u8> for Buffer<'d> {
 			(_, Some(upper)) => upper,
 			(lower, None) => lower
 		};
-		let mut data = Vec::with_capacity(capacity);
-		let mut pool = DefaultPoolContainer::get();
+		let mut data = Vec::<Seg>::with_capacity(capacity);
+		let pool = pool();
 
-		fn claim_or_create(
-			data: &mut Vec<Seg>,
-			pool: &mut DefaultPoolContainer
-		) {
-			if data.last().is_some_and(|seg| !seg.is_full()) {
-				return
+		fn is_full(data: &Vec<Seg>) -> bool {
+			match data.last() {
+				Some(seg) => seg.is_full(),
+				None => true
 			}
-
-			let seg = pool.claim_one().unwrap_or_else(|_| Seg::default());
-			data.push(seg);
 		}
 
 		for byte in iter {
-			claim_or_create(&mut data, &mut pool);
+			if is_full(&data) {
+				data.push(pool.claim_one().unwrap_or_default());
+			}
+
 			let seg = data.last_mut().expect("a segment should have been claimed");
 			seg.push(byte).expect("claimed or created segment should be writable");
 		}
@@ -192,14 +169,16 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		pool: P,
 		BufferOptions {
 			share_threshold,
-			compact_threshold
+			borrow_threshold,
+			allocation,
 		}: BufferOptions
 	) -> Self {
 		Self {
 			data: RBuf::new(),
 			pool,
 			share_threshold,
-			compact_threshold,
+			borrow_threshold,
+			allocation,
 		}
 	}
 
@@ -209,14 +188,16 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		data: impl Into<RBuf<Seg<'d, N>>>,
 		BufferOptions {
 			share_threshold,
-			compact_threshold
+			borrow_threshold,
+			allocation,
 		}: BufferOptions
 	) -> Self {
 		Self {
 			pool,
 			data: data.into(),
 			share_threshold,
-			compact_threshold,
+			borrow_threshold,
+			allocation,
 		}
 	}
 
@@ -224,7 +205,8 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	pub fn options(&self) -> BufferOptions {
 		BufferOptions {
 			share_threshold: self.share_threshold,
-			compact_threshold: self.compact_threshold,
+			borrow_threshold: self.borrow_threshold,
+			allocation: self.allocation,
 		}
 	}
 
@@ -294,106 +276,30 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 			.context(Clear)
 	}
 
-	/// Reserves at least `count` bytes of additional memory in the buffer. This
-	/// will either claim segments from the pool, or compact existing segments.
+	/// Reserves at least `count` bytes of additional memory in the buffer.
 	pub fn reserve(&mut self, mut count: usize) -> Result {
-		count = count.saturating_sub(
-			self.compact_until(count).context(Reserve)?
-		);
+		let Self { data, pool, allocation, .. } = self;
 
-		let Self { data, pool, .. } = self;
-
-		if count > 0 {
-			pool.claim_size(data, count).context(Reserve)
-		} else {
-			Ok(())
-		}
-	}
-
-	/// Compacts partially written segments, filling gaps (called *fragmentation*)
-	/// to free space. The buffer will automatically compact after writes when
-	/// fragmentation reaches the set *[compact threshold]*.
-	///
-	/// [compact threshold]: BufferOptions::compact_threshold
-	pub fn compact(&mut self) -> Result<usize> {
-		if self.data.fragment_len() == 0 {
-			return Ok(0)
+		let limit = data.limit();
+		if count <= limit {
+			return Ok(())
 		}
 
-		self.compact_while(|_| true)
-	}
-
-	fn compact_until(&mut self, mut count: usize) -> Result<usize> {
-		count = count.saturating_sub(self.data.limit());
-		if count > 0 || self.data.fragment_len() == 0 {
-			return Ok(0)
-		}
-
-		self.compact_while(|written| {
-			count = count.saturating_sub(written);
-			count > 0
-		})
-	}
-
-	fn compact_while(&mut self, mut f: impl FnMut(usize) -> bool) -> Result<usize> {
-		let Self { pool, data, .. } = self;
-
-		let len = data.len();
-		let mut i = 0;
-		let slice = data.make_contiguous();
-		let mut offset = 0;
-
-		let result: pool::Result = try {
-			while i < len {
-				match &mut slice[offset..offset + len] {
-					[a, _, ..] if a.is_shared() && !a.is_slice() && !a.is_full() => {
-						// Variable-length shared segments may be larger than one
-						// fixed segment. Splitting these would be non-trivial with
-						// this slice implementation, so these are skipped.
-						if a.len() <= N {
-							let mut shared = mem::replace(a, pool.claim_one()?);
-
-							// Allocate memory if a broken pool returns a shared
-							// segment.
-							if a.is_shared() {
-								*a = Seg::default();
-							}
-
-							a.write_from(&mut shared)
-							 .expect("claimed or allocated segment should be writable");
-							debug_assert!(shared.is_empty());
-							pool.collect_one(shared)?;
-						} else {
-							i += 1;
-							offset += 1;
-						}
-					}
-					[a, b, ..] if !a.is_shared() => {
-						let written = a.write_from(b);
-						let offset = if written.is_none() || a.is_full() {
-							i += 1;
-							offset += 1;
-							0
-						} else {
-							1
-						};
-
-						if b.is_empty() && i < len {
-							slice[i + offset..].rotate_left(1);
-						}
-
-						if !f(written.unwrap_or_default()) {
-							break
-						}
-					}
-					_ => break
-				}
+		count -= limit;
+		let seg_count = count.div_ceil(N);
+		match allocation {
+			Allocate::Always => {
+				data.allocate(seg_count);
+				Ok(())
 			}
-		};
-
-		data.invalidate();
-		result.context(Compact)?;
-		Ok(data.limit())
+			Allocate::OnError => {
+				if let Err(_) = pool.claim_size(data, count) {
+					data.allocate(seg_count);
+				}
+				Ok(())
+			}
+			Allocate::Never => pool.claim_size(data, count).context(Reserve)
+		}
 	}
 
 	/// Returns empty segments to the pool after reading.
@@ -401,16 +307,6 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		let Self { pool, data, .. } = self;
 		pool.collect(data.drain_all_empty())
 			.context(Resize)
-	}
-
-	/// Compacts segments after writing, if fragmentation has reached to set
-	/// threshold.
-	fn check_compact(&mut self) -> Result {
-		if self.data.fragment_len() >= self.compact_threshold {
-			self.compact()?;
-		}
-
-		Ok(())
 	}
 
 	/// Copies `count` bytes into `sink`. Memory is either actually copied or
@@ -430,20 +326,18 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 					sink.data.push_back(shared);
 					count -= size;
 				} else {
-					sink.pool.claim_size(&mut sink.data, size)?;
+					sink.reserve(size)?;
 
 					while let Some(mut dst) = shared.is_not_empty().then(||
 						sink.data
 							.pop_back()
-							.unwrap_or_default() // Allocate if claim_size didn't claim enough segments.
+							.expect("sufficient space should have been reserved")
 					) {
 						dst.write_from(&mut shared);
 						sink.data.push_back(dst);
 					}
 				}
 			}
-
-			sink.check_compact()?;
 		};
 		result.set_context(Copy)
 	}

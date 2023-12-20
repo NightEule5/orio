@@ -9,8 +9,7 @@ use std::rc::Rc;
 use std::result;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use crate::segment::alloc_block;
-use super::segment::{Seg, SIZE};
+use super::segment::{alloc_block, Seg, SIZE};
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]
 #[error("failed to borrow the pool")]
@@ -20,10 +19,6 @@ pub type Result<T = ()> = result::Result<T, PoolError>;
 
 impl From<BorrowMutError> for PoolError {
 	fn from(_: BorrowMutError) -> Self { Self }
-}
-
-const fn calc_claim_count(min_size: usize, size: usize) -> usize {
-	min_size.next_multiple_of(size) / size
 }
 
 pub trait Pool<const N: usize = SIZE>: Clone {
@@ -39,11 +34,6 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 	/// Claims a single segment.
 	fn claim_one<'d>(&self) -> Result<Seg<'d, N>> {
 		Ok(self.try_borrow()?.claim_one())
-	}
-	
-	/// Claims a single segment, or allocates one if the pool cannot be borrowed.
-	fn claim_or_alloc_one<'d>(&self) -> Seg<'d, N> {
-		self.claim_one().unwrap_or_else(|_| Seg::default())
 	}
 
 	/// Claims `count` segments into `target`.
@@ -108,7 +98,7 @@ pub trait MutPool<const N: usize = SIZE> {
 
 	/// Claims many segments into the container, at least `min_size` in total size.
 	fn claim_size<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize) where Self: Sized {
-		self.claim_count(target, calc_claim_count(min_size, N))
+		self.claim_count(target, min_size.div_ceil(N))
 	}
 
 	/// Reserves space to collect at least `count` segments into the pool.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Buffer, BufferResult, DefaultBuffer, Error, ResultContext, StreamResult};
+use crate::{Buffer, BufferResult, Error, ResultContext, StreamResult};
 use crate::BufferContext::{Drain, Fill};
 use crate::error::Context;
 use crate::pool::Pool;
@@ -173,7 +173,7 @@ impl<'d, const N: usize, S: Source<'d, N> + Seekable, P: Pool<N>> BufferedSource
 			return Ok(new_pos)
 		}
 
-		let mut seek_buf = DefaultBuffer::default();
+		let mut seek_buf = Buffer::<N, P>::default();
 		self.source
 			.fill(&mut seek_buf, count)
 			.context(Seek)?;

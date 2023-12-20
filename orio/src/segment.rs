@@ -33,14 +33,24 @@ pub const SIZE: usize = 8192;
 /// be claimed from the segment [pool](super::pool), and collected into it when
 /// finished. It's not recommended to let a segment drop instead of collecting it,
 /// unless you're sure it contains shared data.
-#[derive(Clone, Debug, Default, Eq)]
+#[derive(Clone, Debug, Eq)]
 pub struct Seg<'d, const N: usize = SIZE>(Buf<'d, N>);
 
 impl<'d, const N: usize, T: Into<Buf<'d, N>>> From<T> for Seg<'d, N> {
 	fn from(value: T) -> Self { Self(value.into()) }
 }
 
+impl<const N: usize> Default for Seg<'_, N> {
+	#[inline]
+	fn default() -> Self { Self::new_block() }
+}
+
 impl<'d, const N: usize> Seg<'d, N> {
+	/// Allocates a new block segment.
+	pub fn new_block() -> Self {
+		Self(Buf::Block(BlockDeque::new()))
+	}
+
 	/// Creates a segment containing `slice`.
 	pub const fn from_slice(slice: &'d [u8]) -> Self {
 		Self(Buf::Slice(slice))
@@ -273,7 +283,7 @@ impl<'d, const N: usize> Seg<'d, N> {
 			Self(Buf::Boxed(boxed)) => Seg(Buf::Boxed(boxed)),
 			Self(Buf::Slice(slice)) => {
 				assert_gt!(slice.len(), N);
-				let mut target = pool.claim_or_alloc_one();
+				let mut target = pool.claim_one().unwrap_or_default();
 				assert_eq!(
 					target.write(slice).expect("claimed or allocated segment should be writable"),
 					slice.len()
@@ -324,10 +334,6 @@ impl<'d, const N: usize> Index<usize> for Seg<'d, N> {
 }
 
 impl<'d, const N: usize> Seg<'d, N> {
-	pub(crate) fn is_slice(&self) -> bool {
-		matches!(self.0, Buf::Slice(_))
-	}
-
 	fn consume_unchecked(&mut self, count: usize) {
 		match &mut self.0 {
 			Buf::Block(block) => block.remove_count(count),

@@ -64,9 +64,6 @@ pub enum BufferContext {
 	/// Resizing the buffer.
 	#[display("resizing")]
 	Resize,
-	/// Compacting the buffer.
-	#[display("compacting")]
-	Compact,
 }
 
 /// Context of what a stream was doing when the error occurred.

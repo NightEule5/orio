@@ -5,10 +5,6 @@ use std::collections::VecDeque;
 use std::ops::{Index, IndexMut};
 use super::Seg;
 
-// Todo: since shared segments may become writable later (when an Rc is dropped),
-//  currently the counted limit is a lower bound. Maybe add a separate "unwritable"
-//  limit count?
-
 /// A shareable, segmented ring buffer. Cloning shares segments in linear (`O(n)`)
 /// time.
 #[derive(Clone, Debug, Eq)]
@@ -16,14 +12,8 @@ pub(crate) struct RBuf<T> {
 	buf: VecDeque<T>,
 	/// The number of readable segments in the buffer.
 	len: usize,
-	/// The total size of space occupied by non-empty segments, including unusable
-	/// gaps between partial segments. For simplicity, this also counts the back
-	/// segment's limit.
-	size: usize,
 	/// The number of readable bytes in the buffer.
 	count: usize,
-	/// The number of writable bytes in the buffer.
-	limit: usize,
 }
 
 impl<T> Default for RBuf<T> {
@@ -34,37 +24,17 @@ impl<T> Default for RBuf<T> {
 
 impl<'d, const N: usize> From<Vec<Seg<'d, N>>> for RBuf<Seg<'d, N>> {
 	fn from(buf: Vec<Seg<'d, N>>) -> Self {
-		// Tuple doesn't implement Sum.
-		#[derive(Default)]
-		struct SumPair(usize, usize);
-
-		impl std::iter::Sum for SumPair {
-			fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-				iter.reduce(|SumPair(acc_a, acc_b), SumPair(cur_a, cur_b)|
-					SumPair(acc_a + cur_a, acc_b + cur_b)
-				).unwrap_or_default()
-			}
-		}
-
 		assert!(
 			buf.iter().is_partitioned(Seg::is_not_empty),
 			"segment vector must be partitioned into non-empty and empty segments"
 		);
 		let len = buf.partition_point(Seg::is_not_empty);
-		let SumPair(count, size) = buf[..len].iter().map(|seg|
-			SumPair(seg.len(), seg.size())
-		).sum();
-		let mut limit = buf[len..].iter().map(Seg::limit).sum();
-		if len > 0 {
-			limit += buf[len - 1].limit();
-		}
+		let count = buf[..len].iter().map(Seg::len).sum();
 
 		Self {
 			buf: buf.into(),
 			len,
-			size,
 			count,
-			limit,
 		}
 	}
 }
@@ -75,9 +45,7 @@ impl<T> RBuf<T> {
 		Self {
 			buf: VecDeque::new(),
 			len: 0,
-			size: 0,
 			count: 0,
-			limit: 0,
 		}
 	}
 }
@@ -93,11 +61,11 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	pub fn count(&self) -> usize { self.count }
 
 	/// Returns the number of bytes that can be written to the buffer.
-	pub fn limit(&self) -> usize { self.limit }
-
-	/// Returns the fragmentation length.
-	pub fn fragment_len(&self) -> usize {
-		self.size - self.count - self.back_limit()
+	pub fn limit(&self) -> usize {
+		self.buf
+			.range(self.len..)
+			.map(Seg::limit)
+			.sum()
 	}
 
 	/// Returns `true` if the buffer is empty.
@@ -117,7 +85,6 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			self.push_empty(seg);
 			return;
 		}
-		self.size += seg.size();
 		self.len += 1;
 		self.count += seg.len();
 		self.buf.push_front(seg);
@@ -130,13 +97,8 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			return
 		}
 
-		self.size += seg.size();
 		self.len += 1;
-		if !self.is_empty() {
-			self.limit -= self.back_limit();
-		}
 		self.count += seg.len();
-		self.limit += seg.limit();
 		self.buf.push_back(seg);
 	}
 
@@ -145,11 +107,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		if !self.is_empty() {
 			let seg = self.buf.pop_front()?;
 			self.count -= seg.len();
-			if self.len == 1 {
-				self.limit -= self.back_limit();
-			}
 			self.len -= 1;
-			self.size -= seg.size();
 			Some(seg)
 		} else {
 			None
@@ -170,38 +128,25 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		};
 
 		self.len -= 1;
-		self.size -= seg.size();
 		self.count -= seg.len();
-		self.limit -= seg.limit();
 		Some(seg)
 	}
 
-	/// Rearranges segments into one contiguous slice, returning that slice. Using
-	/// this slice invalidates the buffer, and must be followed by [`invalidate`].
-	///
-	/// [`invalidate`]: Self::invalidate
-	pub fn make_contiguous(&mut self) -> &mut [Seg<'a, N>] {
-		self.buf.make_contiguous()
+	/// Allocates `count` segments to the back of the buffer.
+	pub fn allocate(&mut self, count: usize) {
+		self.buf.reserve(count);
+		for _ in 0..count {
+			self.buf.push_back(Seg::default());
+		}
 	}
 
 	/// Invalidates and recalculates the counts.
 	pub fn invalidate(&mut self) {
-		let mut last_limit = None;
-
 		for seg in &self.buf {
-			self.size += seg.size();
-
-			if seg.is_empty() {
-				self.limit += seg.limit();
-			} else {
+			if seg.is_not_empty() {
 				self.len += 1;
 				self.count += seg.len();
-				last_limit = Some(seg.limit());
 			}
-		}
-
-		if let Some(ll) = last_limit {
-			self.limit += ll;
 		}
 	}
 
@@ -210,34 +155,15 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		// Drain all segments
 		if count >= self.capacity() {
 			self.len = 0;
-			self.size = 0;
 			self.count = 0;
-			self.limit = 0;
 		} else {
-			let (size, count) =
+			let count =
 				self.buf
 					.iter()
 					.take(count)
-					.map(|seg| (seg.size(), seg.limit()))
-					.reduce(|(mut s_sum, mut l_sum), (s_cur, l_cur)| {
-						s_sum += s_cur;
-						l_sum += l_cur;
-						(s_sum, l_sum)
-					})
-					.unwrap_or_default();
-			self.size -= size;
-			self.count -= count;
-
-			if count >= self.back_index() {
-				self.limit -= self.back_limit();
-			}
-
-			self.limit -=
-				self.buf
-					.iter()
-					.take(count.saturating_sub(self.len))
 					.map(Seg::limit)
 					.sum::<usize>();
+			self.count -= count;
 
 			if count <= self.len {
 				self.len -= count;
@@ -254,7 +180,6 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		let mut range = self.len..self.capacity();
 		let len = range.len();
 		range.start += len - min(len, count);
-		self.limit -= self.buf.range(range.clone()).map(Seg::limit).sum::<usize>();
 		self.buf.drain(range)
 	}
 	
@@ -325,23 +250,13 @@ impl<T> RBuf<T> {
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	fn back_index(&self) -> usize { self.len - 1 }
 
-	pub(crate) fn back_limit(&self) -> usize {
-		if self.is_empty() {
-			0
-		} else {
-			self.buf[self.back_index()].limit()
-		}
-	}
-
 	fn push_empty(&mut self, seg: Seg<'a, N>) {
-		self.limit += seg.limit();
 		self.buf.push_back(seg);
 	}
 
 	fn pop_empty(&mut self) -> Option<Seg<'a, N>> {
 		if self.has_empty() {
 			let empty = self.buf.pop_back()?;
-			self.limit -= empty.limit();
 			Some(empty)
 		} else {
 			None
@@ -375,21 +290,8 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		}
 
 		if non_empty_len > 0 {
-			self.limit -= self.back_limit();
 			self.len += non_empty_len;
-			self.limit += self.back_limit();
 		}
-
-		self.size +=
-			self.buf
-				.range(start..end)
-				.map(Seg::size)
-				.sum::<usize>();
-		self.limit +=
-			self.buf
-				.range(start + non_empty_len..end)
-				.map(Seg::limit)
-				.sum::<usize>();
 
 		// Rotate the empty segments back.
 		self.rotate_back(start);

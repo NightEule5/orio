@@ -4,7 +4,7 @@
 //! impls. Uses the claim_count and collect methods if sized, falling back to loops
 //! if not. Only usable from the Pool trait where the types are known.
 
-use super::{MutPool, Seg, calc_claim_count};
+use super::{MutPool, Seg};
 
 pub trait MutPoolSpec<const N: usize> {
 	fn claim_size_spec<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize);
@@ -30,7 +30,7 @@ impl<const N: usize, P: MutPool<N>> MutPoolSpec<N> for P {
 
 impl<const N: usize, P: MutPool<N> + ?Sized> MutPoolSpec<N> for P {
 	default fn claim_size_spec<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize) {
-		self.claim_count_spec(target, calc_claim_count(min_size, N))
+		self.claim_count_spec(target, min_size.div_ceil(N))
 	}
 
 	default fn claim_count_spec<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, count: usize) {

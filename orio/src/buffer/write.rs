@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
 use crate::{Buffer, BufferResult, ResultContext, Seg, StreamResult as Result};
 use crate::BufferContext::Drain;
 use crate::streams::{BufSink, BufSource, Sink};
@@ -24,19 +23,12 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	///
 	/// [`write_from_slice`]: Buffer::write_from_slice
 	pub fn push_slice(&mut self, value: &'d [u8]) {
-		self.push_segment(Seg::from_slice(value));
-	}
-	
-	pub fn push_utf8_owned(&mut self, value: String) {
-		self.push_segment(value.into())
-	}
-	
-	pub fn push_vec(&mut self, value: Vec<u8>) {
-		self.push_segment(value.into())
-	}
-	
-	pub fn push_deque(&mut self, value: VecDeque<u8>) {
-		self.push_segment(value.into())
+		// If the slice length is below the borrow threshold, try writing the slice
+		// before using borrowing as a fallback.
+		if value.len() >= self.borrow_threshold ||
+			self.write_from_slice(value).is_err() {
+			self.push_segment(Seg::from_slice(value));
+		}
 	}
 
 	/// Pushes a segment to the buffer.
@@ -66,21 +58,6 @@ impl<'d, const N: usize, P: Pool<N>> BufSink<'d, N> for Buffer<'d, N, P> {
 
 	fn write_from_slice(&mut self, mut value: &[u8]) -> Result<usize> {
 		let mut count = 0;
-
-		// Write as a slice segment if the length is above the share threshold, but
-		// avoid pushing fragmentation beyond the compact threshold.
-
-		let back_lim = self.data.back_limit();
-		let frag_len = self.data.fragment_len() + back_lim;
-
-		if frag_len >= self.compact_threshold && back_lim > 0 {
-			count = self.data.write_back(
-				&mut value,
-				"buffer with back_limit > 0 should have writable segment"
-			);
-		}
-
-		// Write into segments.
 		self.reserve(value.len()).context(Write)?;
 		while !value.is_empty() {
 			count += self.data.write_back(

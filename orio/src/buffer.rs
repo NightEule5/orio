@@ -270,7 +270,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		}
 		// Take the internal ring buffer instead of draining. This should be
 		// significantly faster.
-		let segments = self.take_buf();
+		let segments = self.take_buf().buf;
 		self.pool
 			.collect(segments)
 			.context(Clear)
@@ -368,7 +368,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 				break
 			}
 		}
-		self.data.invalidate();
+		self.data.consume(skipped);
 		self.pool
 			.collect(self.data.drain(seg_count))
 			.context(Read)?;

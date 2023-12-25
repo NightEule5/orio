@@ -4,7 +4,8 @@ mod hack;
 
 use std::cell::{BorrowMutError, RefCell, RefMut};
 use std::default::Default;
-use std::ops::DerefMut;
+use std::iter::Map;
+use std::ops::{DerefMut, Range};
 use std::rc::Rc;
 use std::result;
 use itertools::Itertools;
@@ -145,15 +146,18 @@ pub fn pool() -> DefaultPoolContainer { POOL.clone() }
 #[thread_local]
 static POOL: Lazy<DefaultPoolContainer> = Lazy::new(DefaultPoolContainer::default);
 
+impl DefaultPool {
+	fn allocate(count: usize) -> Map<Range<usize>, fn(usize) -> Box<[u8; SIZE]>> {
+		(0..count).map(|_| alloc_block())
+	}
+}
+
 impl MutPool for DefaultPool {
 	fn claim_reserve(&mut self, mut count: usize) {
 		let Self(vec) = self;
-		let len = vec.len();
-		vec.reserve(count);
-
-		count = vec.len().saturating_sub(len);
-		let vec = &mut vec[len..];
-		vec[..count].fill_with(alloc_block);
+		let existing_count = count.min(vec.len());
+		let allocate_count = count - existing_count;
+		vec.extend(Self::allocate(allocate_count));
 	}
 
 	fn claim_one<'d>(&mut self) -> Seg<'d> {
@@ -161,12 +165,19 @@ impl MutPool for DefaultPool {
 	}
 
 	fn claim_count<'d>(&mut self, target: &mut impl Extend<Seg<'d>>, count: usize) where Self: Sized {
-		self.claim_reserve(count);
-		target.extend(
-			self.0
-				.drain(..count)
-				.map_into()
-		)
+		if count == 1 {
+			target.extend_one(self.claim_one());
+		} else {
+			let Self(vec) = self;
+			let existing_count = count.min(vec.len());
+			let allocate_count = count - existing_count;
+			target.extend(
+				self.0
+					.drain(..existing_count)
+					.chain(Self::allocate(allocate_count))
+					.map_into()
+			);
+		}
 	}
 
 	fn collect_reserve(&mut self, count: usize) {

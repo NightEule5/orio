@@ -9,7 +9,7 @@ use super::Seg;
 /// time.
 #[derive(Clone, Debug, Eq)]
 pub(crate) struct RBuf<T> {
-	buf: VecDeque<T>,
+	pub(crate) buf: VecDeque<T>,
 	/// The number of readable segments in the buffer.
 	len: usize,
 	/// The number of readable bytes in the buffer.
@@ -63,7 +63,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Returns the number of bytes that can be written to the buffer.
 	pub fn limit(&self) -> usize {
 		self.buf
-			.range(self.len..)
+			.range(self.len.saturating_sub(1)..)
 			.map(Seg::limit)
 			.sum()
 	}
@@ -76,7 +76,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 	/// Returns a reference to the back segment.
 	pub fn back(&self) -> Option<&Seg<'a, N>> {
-		(!self.is_empty()).then(|| &self.buf[self.back_index()])
+		Some(&self.buf[self.back_index()?])
 	}
 
 	/// Pushes `seg` to the front of the buffer.
@@ -116,11 +116,15 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 	/// Pops a writable segment from the back of the buffer.
 	pub fn pop_back(&mut self) -> Option<Seg<'a, N>> {
-		let index = self.back_index();
-		if self.is_empty() || self.buf[index].is_full() || self.buf[index].is_shared() {
+		let is_full_or_shared = || {
+			let back = self.back().unwrap();
+			back.is_full() || back.is_shared()
+		};
+		if self.is_empty() || is_full_or_shared() {
 			return self.pop_empty()
 		}
 
+		let index = self.back_index().unwrap();
 		let seg = if self.has_empty() {
 			self.buf.swap_remove_back(index)?
 		} else {
@@ -140,14 +144,9 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		}
 	}
 
-	/// Invalidates and recalculates the counts.
-	pub fn invalidate(&mut self) {
-		for seg in &self.buf {
-			if seg.is_not_empty() {
-				self.len += 1;
-				self.count += seg.len();
-			}
-		}
+	/// Consumes `count` bytes from the internal count.
+	pub fn consume(&mut self, count: usize) {
+		self.count -= count;
 	}
 
 	/// Drains up to `count` segments from the buffer.
@@ -243,12 +242,20 @@ impl<T> RBuf<T> {
 
 	/// Iterates mutably over written segments.
 	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
-		self.buf.iter_mut().take(self.len)
+		self.buf.range_mut(..self.len)
+	}
+
+	/// Rotates empty segments to the back.
+	pub fn rotate_back(&mut self, count: usize) {
+		self.buf.rotate_left(count);
+		self.len -= count;
 	}
 }
 
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
-	fn back_index(&self) -> usize { self.len - 1 }
+	fn back_index(&self) -> Option<usize> {
+		(!self.is_empty()).then(|| self.len - 1)
+	}
 
 	fn push_empty(&mut self, seg: Seg<'a, N>) {
 		self.buf.push_back(seg);
@@ -261,12 +268,6 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		} else {
 			None
 		}
-	}
-
-	/// Rotates empty segments to the back.
-	fn rotate_back(&mut self, count: usize) {
-		self.buf.rotate_left(count);
-		self.len -= count;
 	}
 }
 

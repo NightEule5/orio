@@ -76,15 +76,23 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		Ok(self.count() >= count)
 	}
 
-	fn read_slice(&mut self, mut buf: &mut [u8]) -> Result<usize> {
+	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
 		let mut count = 0;
-		while self.is_not_empty() && !buf.is_empty() {
-			let Some(mut seg) = self.data.pop_front() else { break };
-			let read = seg.read(buf);
-			buf = &mut buf[read..];
-			count += read;
-			self.data.push_front(seg);
+		let mut empty_len = 0;
+		for seg in self.data.iter_mut() {
+			if buf.len() - count == 0 {
+				break
+			}
+
+			count += seg.read(&mut buf[count..]);
+			if seg.is_empty() {
+				empty_len += 1;
+			} else {
+				break
+			}
 		}
+		self.data.consume(count);
+		self.data.rotate_back(empty_len);
 		Ok(count)
 	}
 

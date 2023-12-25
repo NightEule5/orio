@@ -318,6 +318,11 @@ impl<'d, const N: usize> Seg<'d, N> {
 			None
 		}
 	}
+
+	/// Iterates over bytes in the segment.
+	pub fn iter(&self) -> impl Iterator<Item = &u8> + '_ {
+		self.0.iter()
+	}
 }
 
 impl<'d, const N: usize> Index<usize> for Seg<'d, N> {

@@ -373,7 +373,7 @@ mod read {
 				&Value::I128(v, true ) => qc_assert_ok!(buf.read_i128_le(), v),
 				Value::Str(v) => {
 					let ref mut str = String::with_capacity(v.len());
-					qc_assert_ok!(buf.read_utf8_count(str, v.len()));
+					qc_assert_ok!(buf.read_utf8(str, v.len()));
 					qc_assert_str_eq!(str, v);
 				}
 			}

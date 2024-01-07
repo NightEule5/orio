@@ -3,22 +3,22 @@
 mod read;
 mod write;
 mod options;
-mod partial_utf8;
 
 pub use options::*;
-use partial_utf8::*;
 
 use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
-use std::ops::RangeBounds;
+use std::ops::{Range, RangeBounds};
 use all_asserts::assert_ge;
 use itertools::Itertools;
 use crate::pool::{DefaultPoolContainer, Pool, pool};
 use crate::{BufferResult as Result, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
 use crate::BufferContext::{Clear, Copy, Read, Reserve, Resize};
+use crate::pattern::Pattern;
 use crate::segment::RBuf;
 use crate::streams::{BufSink, BufStream, Seekable, SeekOffset, Stream};
+use crate::util::partial_utf8::*;
 
 // Todo: track how much space is reserved to keep empty segments after resize-on-read.
 
@@ -375,88 +375,17 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		Ok(count)
 	}
 
-	/// Returns the index of a `char` in the buffer, or `None` if not found.
-	pub fn find_utf8_char(&self, char: char) -> Option<usize> {
-		self.find_utf8_char_in(char, ..)
+	/// Finds `pattern` within `range` in the buffer, returning the matching byte
+	/// range if found.
+	pub fn find(&self, pattern: impl Pattern) -> Option<Range<usize>> {
+		pattern.find_in(self.data.iter_slices())
 	}
 
-	/// Returns the index of a `char` in the buffer within `range`, or `None` if
-	/// not found. If invalid UTF-8 is encountered before a match is found, returns
-	/// `None`.
-	///
-	/// # Panics
-	///
-	/// Panics if the end point of `range` is greater than [`count`][].
-	///
-	/// [`count`]: Self::count
-	pub fn find_utf8_char_in<R: RangeBounds<usize>>(
-		&self,
-		char: char,
-		range: R
-	) -> Option<usize> {
+	/// Finds `pattern` within `range` in the buffer, returning the matching byte
+	/// range if found.
+	pub fn find_in_range<R: RangeBounds<usize>>(&self, pattern: impl Pattern, range: R) -> Option<Range<usize>> {
 		let range = slice::range(range, ..self.count());
-		let mut start = range.start;
-		let mut count = range.len();
-		let mut offset = 0;
-
-		let ref mut partial_char = PartialChar::default();
-		for seg in self.data.iter() {
-			if count == 0 { break }
-
-			// Seek
-			if start >= seg.len() {
-				start -= seg.len();
-				offset += seg.len();
-				continue
-			} else {
-				offset += start;
-				start = 0;
-			}
-
-			let end = min(count, seg.len());
-
-			let mut invalid = false;
-			let mut search = |mut slice: &[_]| {
-				if invalid {
-					return None
-				}
-
-				while !slice.is_empty() {
-					match from_partial_utf8(&mut slice, partial_char) {
-						Ok(Decoded::Str(str)) => {
-							if let Some(hit) = str.find(char) {
-								return Some(offset + hit)
-							} else {
-								offset += str.len();
-							}
-						}
-						Ok(Decoded::Char(other_char)) => {
-							if char == other_char {
-								return Some(offset)
-							} else {
-								offset += other_char.len_utf8();
-							}
-						}
-						Err(_) => {
-							invalid = true;
-							break
-						}
-					}
-				}
-
-				None
-			};
-
-			let (a, b) = seg.as_slices_in_range(start..end);
-			if let Some(hit) = search(a) { return Some(hit) }
-			if let Some(hit) = search(b) { return Some(hit) }
-
-			if invalid { break }
-
-			count = count.saturating_sub(seg.len());
-		}
-
-		None
+		pattern.find_in(self.data.iter_slices_in_range(range))
 	}
 
 	/// Returns the byte at position `pos`, or `None` if `pos` is out of bounds.

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::marker::PhantomData;
 use std::result;
-use std::str::pattern::{Pattern, Searcher, SearchStep};
 use num_traits::PrimInt;
 use crate::pool::Pool;
 
@@ -13,6 +11,7 @@ pub use seeking::*;
 pub use void::*;
 use crate::{Buffer, BufferResult, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
 use crate::buffered_wrappers::{BufferedSink, BufferedSource};
+use crate::pattern::Pattern;
 use crate::StreamContext::{Read, Write};
 
 /// An "stream closed" error.
@@ -393,16 +392,11 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 		Ok(buf)
 	}
 
-	/// Returns a handle for reading UTF-8 text into `buf`.
-	fn read_utf8<'b>(&'b mut self, buf: &'b mut String) -> ReadUtf8<'b, 'd, N, Self> where 'd: 'b {
-		ReadUtf8 { source: self, buf, _d: PhantomData }
-	}
-
 	/// Reads up to `count` UTF-8 bytes into `buf`, returning the number of bytes
 	/// read. If a decode error occurs, no data is consumed and `buf` will contain
 	/// the last valid data.
-	fn read_utf8_count(&mut self, buf: &mut String, count: usize) -> Result<usize> {
-		self.read_count_spec(count, |src, count| src.read_utf8_count(buf, count))
+	fn read_utf8(&mut self, buf: &mut String, count: usize) -> Result<usize> {
+		self.read_count_spec(count, |src, count| src.read_utf8(buf, count))
 	}
 
 	/// Reads UTF-8 bytes into `buf` until end-of-stream, returning the number of
@@ -433,7 +427,7 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 	/// Reads UTF-8 bytes into `buf` until the `terminator` pattern, returning the
 	/// number of bytes read and whether the pattern was found. If a decode error
 	/// occurs, no data is consumed and `buf` will contain the last valid data.
-	fn read_utf8_until<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
+	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		//self.read_spec(|src| src.read_utf8_until(buf, terminator))
 		//	.map(Into::into)
 		todo!()
@@ -443,75 +437,10 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 	/// returning the number of bytes read and whether the pattern was found. If a
 	/// decode error occurs, no data is consumed and `buf` will contain the last
 	/// valid data.
-	fn read_utf8_until_inclusive<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
+	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		//self.read_spec(|src| src.read_utf8_until_inclusive(buf, terminator))
 		//	.map(Into::into)
 		todo!()
-	}
-}
-
-/// A UTF-8 read operation.
-pub struct ReadUtf8<'b, 'd: 'b, const N: usize, S: BufSource<'d, N> + ?Sized> {
-	source: &'b mut S,
-	buf: &'b mut String,
-	_d: PhantomData<&'d ()>,
-}
-
-struct NewLinePattern;
-struct NewLineSearcher<'a>(&'a str, usize);
-
-impl<'a> Pattern<'a> for NewLinePattern {
-	type Searcher = NewLineSearcher<'a>;
-
-	fn into_searcher(self, haystack: &'a str) -> Self::Searcher {
-		NewLineSearcher(haystack, 0)
-	}
-}
-
-unsafe impl<'a> Searcher<'a> for NewLineSearcher<'a> {
-	fn haystack(&self) -> &'a str { self.0 }
-
-	fn next(&mut self) -> SearchStep {
-		if self.1 >= self.0.len() {
-			SearchStep::Done
-		} else if let Some(pos) = self.0[self.1..].find('\n') {
-			if pos == 0 || self.0.as_bytes()[pos - 1] != b'\r' {
-				self.1 = pos + 1;
-				SearchStep::Match(pos, pos + 1)
-			} else {
-				SearchStep::Match(pos - 1, pos + 1)
-			}
-		} else {
-			let off = self.1;
-			self.1 = self.0.len();
-			SearchStep::Reject(off, self.1)
-		}
-	}
-}
-
-impl<'b, 'd: 'b, const N: usize, S: BufSource<'d, N>> ReadUtf8<'b, 'd, N, S> {
-	pub fn to_end(self) -> Result<usize> {
-		self.source.read_utf8_to_end(self.buf)
-	}
-
-	pub fn count(self, count: usize) -> Result<usize> {
-		self.source.read_utf8_count(self.buf, count)
-	}
-
-	pub fn line(self) -> Result<Utf8Match> {
-		self.source.read_utf8_line(self.buf)
-	}
-
-	pub fn line_inclusive(self) -> Result<Utf8Match> {
-		self.source.read_utf8_line_inclusive(self.buf)
-	}
-
-	pub fn until<P: Pattern<'b>>(self, pattern: P) -> Result<Utf8Match> {
-		self.source.read_utf8_until(self.buf, pattern)
-	}
-
-	pub fn until_inclusive<P: Pattern<'b>>(self, pattern: P) -> Result<Utf8Match> {
-		self.source.read_utf8_until_inclusive(self.buf, pattern)
 	}
 }
 

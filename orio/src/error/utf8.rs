@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::str::from_utf8_unchecked;
 use amplify_derive::Display;
 use simdutf8::compat;
+use simdutf8::basic::from_utf8;
 use thiserror::Error;
+use crate::util::partial_utf8::utf8_char_width;
 
 /// A UTF-8 decode error.
 #[derive(Copy, Clone, Debug, Error)]
@@ -53,6 +56,47 @@ impl Utf8Error {
 	/// The invalid or incomplete byte sequence.
 	pub fn bytes(&self) -> &[u8] {
 		&self.bytes[..self.count]
+	}
+
+	/// Returns the part of the `input` slice containing valid UTF-8 according to
+	/// `valid_up_to`, decoded into a string slice.
+	///
+	/// # Safety
+	///
+	/// The returned string is only valid if `input` contains the same bytes being
+	/// decoded when this error was raised. Passing a different slice could result
+	/// in invalid UTF-8, which is undefined behavior.
+	pub unsafe fn valid_in<'a>(&self, input: &'a [u8]) -> &'a str {
+		debug_assert!(
+			from_utf8(&input[..self.valid_up_to]).is_ok(),
+			"data should be valid UTF-8 up to {}",
+			self.valid_up_to
+		);
+		from_utf8_unchecked(&input[..self.valid_up_to])
+	}
+
+	/// Splits the `input` slice into a string of valid UTF-8 and remaining bytes,
+	/// with the valid part being `valid_up_to` bytes long.
+	///
+	/// # Safety
+	///
+	/// The returned string is only valid if `input` contains the same bytes being
+	/// decoded when this error was raised. Passing a different slice could result
+	/// in invalid UTF-8, which is undefined behavior.
+	pub unsafe fn split_valid<'a>(&self, input: &'a [u8]) -> (&'a str, &'a [u8]) {
+		let (valid, invalid) = input.split_at(self.valid_up_to);
+		let invalid_len = if self.count == 0 && !invalid.is_empty() {
+			utf8_char_width(invalid[0])
+		} else {
+			self.count
+		};
+
+		debug_assert!(
+			from_utf8(valid).is_ok(),
+			"data should be valid UTF-8 up to {}",
+			self.valid_up_to
+		);
+		(from_utf8_unchecked(valid), &invalid[..invalid_len])
 	}
 }
 

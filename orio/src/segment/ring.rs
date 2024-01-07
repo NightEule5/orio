@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::min;
-use std::collections::VecDeque;
-use std::ops::{Index, IndexMut};
+use std::collections::{vec_deque, VecDeque};
+use std::iter::Skip;
+use std::ops::{Index, IndexMut, RangeBounds};
+use std::slice;
 use super::Seg;
 
 /// A shareable, segmented ring buffer. Cloning shares segments in linear (`O(n)`)
@@ -187,6 +189,28 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		self.drain_empty(self.capacity() - self.len)
 	}
 
+	/// Returns an iterator over segment slices in `range`.
+	pub fn iter_slices_in_range<R: RangeBounds<usize>>(&self, range: R) -> SliceRangeIter<'a, '_, N> {
+		let range = slice::range(range, ..self.count);
+		let (skip_len, first_offset) = self.segment_index(range.start);
+		let count = range.len();
+		SliceRangeIter {
+			iter: self.iter().skip(skip_len),
+			first_offset,
+			index: 0,
+			count,
+			cur_count: 0,
+			current: None,
+		}
+	}
+
+	pub fn iter_slices(&self) -> SliceIter<'a, '_, N> {
+		SliceIter {
+			iter: self.iter(),
+			current: None,
+		}
+	}
+
 	/// Returns a pair of slices which contain the buffer segments, in order, with
 	/// written segments at the front and empty segments at the back. Using these
 	/// may invalidate the buffer, and must be followed by [`invalidate`].
@@ -236,12 +260,12 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 impl<T> RBuf<T> {
 	/// Iterates over written segments.
-	pub fn iter(&self) -> impl Iterator<Item = &T> + '_ {
-		self.buf.iter().take(self.len)
+	pub fn iter(&self) -> vec_deque::Iter<T> {
+		self.buf.range(..self.len)
 	}
 
 	/// Iterates mutably over written segments.
-	pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
+	pub fn iter_mut(&mut self) -> vec_deque::IterMut<T> {
 		self.buf.range_mut(..self.len)
 	}
 
@@ -269,9 +293,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			None
 		}
 	}
-}
 
-impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	fn push_many<T: IntoIterator<Item = Seg<'a, N>>>(&mut self, iter: T) {
 		let start = self.len;
 		// Temporarily rotate empty segments to the front before extending, in case
@@ -296,6 +318,19 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 		// Rotate the empty segments back.
 		self.rotate_back(start);
+	}
+
+	fn segment_index(&self, byte_index: usize) -> (usize, usize) {
+		let mut offset = 0;
+		for (i, seg) in self.iter().enumerate() {
+			let remaining = byte_index - offset;
+			if seg.len() > remaining {
+				return (i, remaining)
+			}
+
+			offset += seg.len();
+		}
+		(self.len, 0)
 	}
 }
 
@@ -343,5 +378,103 @@ impl<T> IndexMut<usize> for RBuf<T> {
 impl<T: PartialEq> PartialEq for RBuf<T> {
 	fn eq(&self, other: &Self) -> bool {
 		self.iter().eq(other.iter())
+	}
+}
+
+pub struct SliceRangeIter<'a: 'b, 'b, const N: usize> {
+	iter: Skip<vec_deque::Iter<'b, Seg<'a, N>>>,
+	first_offset: usize,
+	index: usize,
+	count: usize,
+	cur_count: usize,
+	current: Option<(&'b [u8], &'b [u8])>
+}
+
+impl<'a: 'b, 'b, const N: usize> Iterator for SliceRangeIter<'a, 'b, N> {
+	type Item = &'b [u8];
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if let Some((_, b)) = self.current.take() {
+			if !b.is_empty() {
+				return Some(b)
+			}
+		}
+
+		let remaining = self.count - self.cur_count;
+		if remaining == 0 {
+			return None
+		}
+
+		let offset = if self.index == 0 { self.first_offset } else { 0 };
+		let seg = self.iter.next()?;
+		let range = offset..remaining.min(seg.len()) + offset;
+		self.cur_count += range.len();
+		self.index += 1;
+		let (a, b) = seg.as_slices_in_range(range);
+		self.current = Some((a, b));
+		Some(a)
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> DoubleEndedIterator for SliceRangeIter<'a, 'b, N> {
+	fn next_back(&mut self) -> Option<Self::Item> {
+		if let Some((a, b)) = self.current.take() {
+			self.cur_count -= a.len() + b.len();
+			return Some(a)
+		}
+
+		if self.cur_count == 0 {
+			return None
+		}
+
+		let offset = if self.index == 0 { self.first_offset } else { 0 };
+		let seg = self.iter.next_back()?;
+		let range = offset..self.cur_count.min(seg.len()) + offset;
+		self.index = self.index.saturating_sub(1);
+		let (a, b) = seg.as_slices_in_range(range);
+		if b.is_empty() {
+			self.cur_count -= a.len();
+			Some(a)
+		} else {
+			self.current = Some((a, b));
+			Some(b)
+		}
+	}
+}
+
+pub struct SliceIter<'a: 'b, 'b, const N: usize> {
+	iter: vec_deque::Iter<'b, Seg<'a, N>>,
+	current: Option<(&'b [u8], &'b [u8])>
+}
+
+impl<'a: 'b, 'b, const N: usize> Iterator for SliceIter<'a, 'b, N> {
+	type Item = &'b [u8];
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if let Some((_, b)) = self.current.take() {
+			if !b.is_empty() {
+				return Some(b)
+			}
+		}
+
+		let (a, b) = self.iter.next()?.as_slices();
+		self.current = Some((a, b));
+		Some(a)
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> DoubleEndedIterator for SliceIter<'a, 'b, N> {
+	fn next_back(&mut self) -> Option<Self::Item> {
+		if let Some((a, _)) = self.current.take() {
+			return Some(a)
+		}
+
+		let (a, b) = self.iter.next_back()?.as_slices();
+		if b.is_empty() {
+			Some(a)
+		} else {
+			self.current = Some((a, b));
+			Some(b)
+		}
 	}
 }

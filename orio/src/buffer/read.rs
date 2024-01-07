@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::str::pattern::Pattern;
-use crate::{Buffer, StreamResult as Result, ResultContext, BufferResult, StreamResult, ResultSetContext};
-use super::partial_utf8::*;
+use crate::{Buffer, StreamResult as Result, BufferResult, StreamResult, ResultSetContext, ResultContext};
 use crate::BufferContext::Fill;
+use crate::pattern::{LineTerminator, Pattern};
 use crate::pool::Pool;
 use crate::streams::{BufSource, Source, Utf8Match};
 use crate::StreamContext::Read;
+use super::read_partial_utf8_into;
 
 impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 	fn is_eos(&self) -> bool {
@@ -103,55 +103,50 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		Ok(count)
 	}
 
-	fn read_utf8_count(&mut self, buf: &mut String, count: usize) -> Result<usize> {
-		let mut read = 0;
-		let ref mut partial_char = PartialChar::default();
-		while read < count {
-			let remaining = count - read;
-			let Some(seg) = self.data.pop_front() else { break };
-			let (a, b) = seg.as_slices_in_range(..remaining.min(seg.len()));
-			read_partial_utf8_into(a, buf, partial_char, &mut read).context(Read)?;
-			read_partial_utf8_into(b, buf, partial_char, &mut read).context(Read)?;
-		}
-
-		self.skip(read)?;
-		Ok(read)
+	fn read_utf8(&mut self, buf: &mut String, mut count: usize) -> Result<usize> {
+		count = count.min(self.count());
+		buf.reserve(count);
+		let read = read_partial_utf8_into(
+			self.data.iter_slices_in_range(..count),
+			buf
+		).context(Read)?;
+		self.skip(read)
+			.context(Read)
 	}
 
+	#[inline]
 	fn read_utf8_to_end(&mut self, buf: &mut String) -> Result<usize> {
-		self.read_utf8_count(buf, self.count())
+		self.read_utf8(buf, self.count())
 	}
 
+	#[inline]
 	fn read_utf8_line(&mut self, buf: &mut String) -> Result<Utf8Match> {
-		self.read_utf8_line_inclusive(buf).map(|mut um| {
-			if um.found {
-				let nl_len = if buf.ends_with("\r\n") {
-					2
-				} else {
-					1
-				};
-				buf.truncate(buf.len() - nl_len);
-				um.read_count -= nl_len;
-			}
-			um
-		})
+		self.read_utf8_until(buf, LineTerminator)
 	}
 
+	#[inline]
 	fn read_utf8_line_inclusive(&mut self, buf: &mut String) -> Result<Utf8Match> {
-		if let Some(pos) = self.find_utf8_char('\n') {
-			self.read_utf8_count(buf, pos + 1)
-				.map(|count| (count, true).into())
+		self.read_utf8_until_inclusive(buf, LineTerminator)
+	}
+
+	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
+		if let Some(range) = self.find(terminator) {
+			let count = self.read_utf8(buf, range.start)?;
+			self.skip(range.len())?;
+			Ok((count, true).into())
 		} else {
 			self.read_utf8_to_end(buf)
 				.map(|count| (count, false).into())
 		}
 	}
 
-	fn read_utf8_until<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
-		todo!()
-	}
-
-	fn read_utf8_until_inclusive<'p>(&mut self, _buf: &mut String, _terminator: impl Pattern<'p>) -> Result<Utf8Match> {
-		todo!()
+	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
+		if let Some(range) = self.find(terminator) {
+			self.read_utf8(buf, range.end)
+				.map(|count| (count, true).into())
+		} else {
+			self.read_utf8_to_end(buf)
+				.map(|count| (count, false).into())
+		}
 	}
 }

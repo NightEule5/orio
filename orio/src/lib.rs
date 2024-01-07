@@ -59,6 +59,7 @@ mod segment;
 mod element;
 pub mod pool;
 mod util;
+pub mod pattern;
 
 pub use error::*;
 pub use buffer::*;

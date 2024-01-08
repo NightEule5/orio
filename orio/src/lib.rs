@@ -44,6 +44,7 @@
 	pattern,
 	seek_stream_len,
 	slice_as_chunks,
+	slice_index_methods,
 	slice_range,
 	specialization,
 	thread_local,
@@ -53,6 +54,7 @@
 
 mod buffer;
 mod buffered_wrappers;
+mod byte_str;
 mod error;
 pub mod streams;
 mod segment;
@@ -63,4 +65,5 @@ pub mod pattern;
 
 pub use error::*;
 pub use buffer::*;
+pub use byte_str::*;
 pub use segment::*;

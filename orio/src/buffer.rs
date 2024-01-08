@@ -13,7 +13,7 @@ use std::ops::{Range, RangeBounds};
 use all_asserts::assert_ge;
 use itertools::Itertools;
 use crate::pool::{DefaultPoolContainer, Pool, pool};
-use crate::{BufferResult as Result, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
+use crate::{BufferResult as Result, ByteStr, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
 use crate::BufferContext::{Clear, Copy, Read, Reserve, Resize};
 use crate::pattern::Pattern;
 use crate::segment::RBuf;
@@ -129,6 +129,17 @@ impl<'d> Buffer<'d> {
 	pub fn from_slice<T: AsRef<[u8]> + ?Sized>(value: &'d T) -> Self {
 		let mut buf = Self::default();
 		buf.push_slice(value.as_ref());
+		buf
+	}
+
+	/// Creates a new buffer from a [byte string](ByteStr) without copying its
+	/// contents.
+	pub fn from_byte_str(value: ByteStr<'d>) -> Self {
+		let mut buf = Self::default();
+		buf.data = value.iter()
+						.map(Seg::from_slice)
+						.collect::<Vec<_>>()
+						.into();
 		buf
 	}
 }
@@ -401,6 +412,11 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		}
 
 		None
+	}
+
+	/// Borrows the contents of the buffer as a [byte string](ByteStr).
+	pub fn as_byte_str(&self) -> ByteStr {
+		(&self.data).into()
 	}
 }
 

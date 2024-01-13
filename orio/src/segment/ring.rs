@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cmp::min;
+use std::cmp::{min, Ordering};
 use std::collections::{vec_deque, VecDeque};
 use std::iter::Skip;
-use std::ops::{Index, IndexMut, RangeBounds};
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
+use std::ptr::NonNull;
 use std::slice;
+use all_asserts::debug_assert_le;
 use super::Seg;
 
 /// A shareable, segmented ring buffer. Cloning shares segments in linear (`O(n)`)
@@ -16,6 +19,13 @@ pub(crate) struct RBuf<T> {
 	len: usize,
 	/// The number of readable bytes in the buffer.
 	count: usize,
+}
+
+pub struct BackMut<'a, 'b, const N: usize> {
+	ring: NonNull<RBuf<Seg<'a, N>>>,
+	back: &'b mut Seg<'a, N>,
+	start_len: usize,
+	_lifetime_b: PhantomData<&'b Seg<'a, N>>
 }
 
 impl<T> Default for RBuf<T> {
@@ -52,6 +62,56 @@ impl<T> RBuf<T> {
 	}
 }
 
+impl<'a: 'b, 'b, const N: usize> Deref for BackMut<'a, 'b, N> {
+	type Target = Seg<'a, N>;
+
+	fn deref(&self) -> &Self::Target {
+		self.back
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> DerefMut for BackMut<'a, 'b, N> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.back
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> Drop for BackMut<'a, 'b, N> {
+	fn drop(&mut self) {
+		let Self { ring, back, start_len, .. } = self;
+		let is_empty = *start_len == 0;
+		match back.len().cmp(start_len) {
+			Ordering::Less => {
+				// Segment was emptied
+				if !is_empty && back.is_empty() {
+					unsafe {
+						ring.as_mut().dec_len(1);
+					}
+				}
+
+				let consumed = *start_len - back.len();
+				unsafe {
+					ring.as_mut().dec_count(consumed);
+				}
+			}
+			Ordering::Greater => {
+				// Segment was filled
+				if is_empty {
+					unsafe {
+						ring.as_mut().inc_len(1);
+					}
+				}
+
+				let added = back.len() - *start_len;
+				unsafe {
+					ring.as_mut().inc_count(added);
+				}
+			}
+			_ => { }
+		}
+	}
+}
+
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Returns the number of readable segments in the buffer.
 	pub fn len(&self) -> usize { self.len }
@@ -79,6 +139,21 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Returns a reference to the back segment.
 	pub fn back(&self) -> Option<&Seg<'a, N>> {
 		Some(&self.buf[self.back_index()?])
+	}
+
+	/// Returns a drop-guarded mutable reference to the back segment.
+	pub fn back_mut(&mut self) -> Option<BackMut<'a, '_, N>> {
+		self.back_index().map(|i| {
+			let ring = self.into();
+			let back = &mut self.buf[i];
+			let start_len = back.len();
+			BackMut {
+				ring,
+				back,
+				start_len,
+				_lifetime_b: PhantomData
+			}
+		})
 	}
 
 	/// Pushes `seg` to the front of the buffer.
@@ -256,6 +331,108 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			i += 1;
 		}
 	}
+
+	/// Counts segments with at least `count` bytes of total writable capacity,
+	/// returning the segment count and the remaining bytes written to the last
+	/// segment.
+	pub fn count_writable(&self, mut count: usize) -> (usize, usize) {
+		let mut remaining_count = 0;
+		(
+			self.buf
+				.range(self.len..)
+				.position(|seg|
+					count > 0 && {
+						if seg.limit() <= count {
+							count -= self.limit();
+						} else {
+							remaining_count = count;
+							count = 0;
+						}
+						true
+					}
+				).unwrap_or(0),
+			remaining_count
+		)
+	}
+
+	pub fn writable_index(&self) -> usize {
+		self.back_index()
+			.filter(|&i| self.buf[i].is_full())
+			.unwrap_or(self.len)
+	}
+
+	pub fn is_back_writable(&self) -> bool {
+		self.back().is_some_and(|seg| !seg.is_full())
+	}
+
+	pub fn iter_writable(&mut self, count: usize) -> vec_deque::IterMut<Seg<'a, N>> {
+		let start = self.writable_index();
+		self.buf.range_mut(start..start + count)
+	}
+
+	/// Grows the buffer and its segments by `count` bytes.
+	pub unsafe fn grow(&mut self, count: usize) {
+		let mut seg_count = 0;
+		let is_back_writable = self.is_back_writable();
+		let mut counted = 0;
+		for seg in self.buf.range_mut(self.len.saturating_sub(1)..) {
+			if counted == count {
+				break
+			}
+
+			let grow_len = seg.limit().min(count);
+			seg.set_len(seg.len() + grow_len);
+			counted += grow_len;
+			seg_count += 1;
+		}
+
+		if is_back_writable {
+			seg_count -= 1;
+		}
+
+		self.inc_len(seg_count);
+		self.inc_count(count);
+	}
+
+	/// Increments the tracked length after writing.
+	unsafe fn inc_len(&mut self, len: usize) {
+		debug_assert_eq!(
+			self.len + len,
+			self.buf.iter().rposition(Seg::is_not_empty).unwrap_or_default()
+		);
+		self.len += len;
+	}
+
+	/// Decrements the tracked length after reading.
+	unsafe fn dec_len(&mut self, len: usize) {
+		use all_asserts::assert_le;
+		debug_assert_le!(len, self.len);
+		debug_assert_eq!(
+			self.len - len,
+			self.buf.iter().rposition(Seg::is_not_empty).unwrap_or_default()
+		);
+		self.len -= len;
+	}
+
+	/// Increments the tracked count after writing.
+	unsafe fn inc_count(&mut self, count: usize) {
+		debug_assert_eq!(
+			self.count + count,
+			self.iter().map(Seg::len).sum()
+		);
+		self.count += count;
+	}
+
+	/// Decrements the tracked count after reading.
+	unsafe fn dec_count(&mut self, count: usize) {
+		use all_asserts::assert_le;
+		debug_assert_le!(count, self.count);
+		debug_assert_eq!(
+			self.count - count,
+			self.iter().map(Seg::len).sum()
+		);
+		self.count -= count;
+	}
 }
 
 impl<T> RBuf<T> {
@@ -278,11 +455,18 @@ impl<T> RBuf<T> {
 
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	fn back_index(&self) -> Option<usize> {
-		(!self.is_empty()).then(|| self.len - 1)
+		(!self.is_empty())
+			.then(|| self.len - 1)
+			.filter(|&i| self.buf[i].is_full())
+			.or_else(|| self.has_empty().then_some(self.len))
 	}
 
 	fn push_empty(&mut self, seg: Seg<'a, N>) {
-		self.buf.push_back(seg);
+		if seg.is_exclusive() {
+			self.buf.push_back(seg);
+		}
+
+		// Let shared segments drop
 	}
 
 	fn pop_empty(&mut self) -> Option<Seg<'a, N>> {
@@ -296,24 +480,21 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 	fn push_many<T: IntoIterator<Item = Seg<'a, N>>>(&mut self, iter: T) {
 		let start = self.len;
+		let old_capacity = self.capacity();
 		// Temporarily rotate empty segments to the front before extending, in case
-		// iter contains non-empty segments.
+		// iter contains written segments. The ensures new written segments stay in
+		// chronological order front-to-back tailed by empty segments.
 		self.buf.rotate_right(start);
 		self.buf.extend(iter);
-		let end = self.capacity();
 
-		// Partition non-empty segments ahead of empty segments.
-		let mut non_empty_len = 0;
-		for i in start..end {
-			let seg = &self.buf[i];
-			if seg.is_not_empty() && i > non_empty_len {
-				self.buf.swap(i, start + non_empty_len);
-				non_empty_len += 1;
-			}
-		}
-
-		if non_empty_len > 0 {
-			self.len += non_empty_len;
+		// Count segments starting from the old capacity until the last written
+		// segment, which is the number of written segments added.
+		let new_len = self.buf
+						  .range(old_capacity..)
+						  .rposition(Seg::is_not_empty);
+		// Push the new length if any were written.
+		if let Some(new_len) = new_len {
+			self.len += new_len;
 		}
 
 		// Rotate the empty segments back.
@@ -335,6 +516,13 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 }
 
 impl<'a, const N: usize> Extend<Seg<'a, N>> for RBuf<Seg<'a, N>> {
+	/// Extends the ring buffer with elements from `iter`, inserting written segments
+	/// at [`len`] and pushing empty segments to the back. Any empty segments between
+	/// written segments are not moved.
+	///
+	/// This operation is implemented with rotation, so it should be used sparingly.
+	///
+	/// [`len`]: Self::len
 	fn extend<T: IntoIterator<Item = Seg<'a, N>>>(&mut self, iter: T) {
 		self.push_many(iter);
 	}

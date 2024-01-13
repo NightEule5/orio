@@ -6,7 +6,7 @@ use std::collections::{VecDeque, vec_deque::Iter as DequeIter};
 use std::{fmt, slice};
 use std::ops::RangeBounds;
 use std::rc::Rc;
-use super::block_deque::BlockDeque;
+use super::{BlockDeque, Block};
 
 /// A segment buffer.
 #[derive(Clone, Debug, Eq)]
@@ -174,8 +174,8 @@ impl<const N: usize> From<BlockDeque<N>> for Buf<'_, N> {
 	}
 }
 
-impl<const N: usize> From<Box<[u8; N]>> for Buf<'_, N> {
-	fn from(value: Box<[u8; N]>) -> Self {
+impl<const N: usize> From<Block<N>> for Buf<'_, N> {
+	fn from(value: Block<N>) -> Self {
 		BlockDeque::from(value).into()
 	}
 }

@@ -91,18 +91,47 @@ pub trait Source<'d, const N: usize = SIZE>: Stream<N> {
 	fn is_eos(&self) -> bool;
 	/// Fills a buffer with up to `count` bytes read from the source, returning the
 	/// number of bytes read.
+	/// 
+	/// # Errors
+	/// 
+	/// If any error occurs, any bytes that have already been written to the buffer
+	/// will remain buffered.
 	fn fill(
 		&mut self,
 		sink: &mut Buffer<'d, N, impl Pool<N>>,
 		count: usize
 	) -> BufferResult<usize>;
+	/// Fills free space in the buffer with bytes read from the source, returning
+	/// the number of bytes read. Shorthand for `fill(sink, sink.limit())`.
+	///
+	/// # Errors
+	///
+	/// If any error occurs, any bytes that have already been written to the buffer
+	/// will remain buffered.
+	fn fill_free(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
+		self.fill(sink, sink.limit())
+	}
 	/// Fills a buffer with all available data read from the source, returning the
-	/// number of bytes read.
+	/// number of bytes read. This may not read the source to its end.
+	///
+	/// The default implementation fills free space in `sink`, then fills with `N`
+	/// bytes repeatedly until end-of-stream is reached or no bytes are read.
+	///
+	/// # Errors
+	///
+	/// If any error occurs, any bytes that have already been written to the buffer
+	/// will remain buffered.
 	fn fill_all(
 		&mut self,
 		sink: &mut Buffer<'d, N, impl Pool<N>>
 	) -> BufferResult<usize> {
-		self.fill(sink, usize::MAX)
+		let mut total = 0;
+		let mut last = self.fill_free(sink)?;
+		while !self.is_eos() && last > 0 {
+			total += last;
+			last = self.fill(sink, N)?;
+		}
+		Ok(total)
 	}
 }
 

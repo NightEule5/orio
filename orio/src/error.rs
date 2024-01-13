@@ -10,7 +10,7 @@ use crate::streams::{EndOfStream, StreamClosed};
 use crate::pool::PoolError;
 pub use utf8::*;
 
-mod sealed {
+pub(crate) mod sealed {
 	use std::fmt::{Debug, Display};
 
 	pub trait Context: Copy + Clone + Debug + Display + Default {}
@@ -302,5 +302,33 @@ impl<T, C: sealed::Context> ResultSetContext<T, C> for Result<T, Error<C>> {
 			error.context = context;
 		}
 		self
+	}
+}
+
+impl<C: sealed::Context> From<Error<C>> for io::Error {
+	fn from(error: Error<C>) -> Self {
+		error.source.into()
+	}
+}
+
+impl From<ErrorSource> for io::Error {
+	fn from(value: ErrorSource) -> Self {
+		use crate::error::ErrorSource::*;
+		use io::ErrorKind::UnexpectedEof;
+
+		match value {
+			Eos(err) => Self::new(UnexpectedEof, err),
+			Io(err) =>
+				Rc::try_unwrap(err)
+					.unwrap_or_else(|err|
+						// Can't completely reconstruct a shared IO error
+						err.kind().into()
+					),
+			Closed(err) => Self::other(err),
+			Utf8(err) => Self::other(err),
+			Pool(err) => Self::other(err),
+			Stream(err) => err.source.into(),
+			Buffer(err) => err.source.into(),
+		}
 	}
 }

@@ -5,12 +5,13 @@ mod hack;
 use std::cell::{BorrowMutError, RefCell, RefMut};
 use std::default::Default;
 use std::iter::Map;
+use std::mem::MaybeUninit;
 use std::ops::{DerefMut, Range};
 use std::rc::Rc;
 use std::result;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use super::segment::{alloc_block, Seg, SIZE};
+use super::segment::{alloc_block, Block, Seg, SIZE};
 
 #[derive(Copy, Clone, Debug, thiserror::Error)]
 #[error("failed to borrow the pool")]
@@ -118,7 +119,7 @@ pub trait MutPool<const N: usize = SIZE> {
 }
 
 #[derive(Default)]
-pub struct DefaultPool(Vec<Box<[u8; SIZE]>>);
+pub struct DefaultPool(Vec<Box<[MaybeUninit<u8>; SIZE]>>);
 
 #[derive(Clone)]
 pub struct DefaultPoolContainer(Rc<RefCell<DefaultPool>>);
@@ -147,7 +148,7 @@ pub fn pool() -> DefaultPoolContainer { POOL.clone() }
 static POOL: Lazy<DefaultPoolContainer> = Lazy::new(DefaultPoolContainer::default);
 
 impl DefaultPool {
-	fn allocate(count: usize) -> Map<Range<usize>, fn(usize) -> Box<[u8; SIZE]>> {
+	fn allocate(count: usize) -> Map<Range<usize>, fn(usize) -> Block> {
 		(0..count).map(|_| alloc_block())
 	}
 }

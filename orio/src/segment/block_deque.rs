@@ -7,8 +7,12 @@
 use std::{fmt, mem, slice};
 use std::cmp::min;
 use std::iter::{FusedIterator};
+use std::mem::MaybeUninit;
 use std::ops::{IndexMut, Range, RangeBounds};
 use std::rc::Rc;
+use all_asserts::assert_le;
+
+pub type Block<const N: usize = { super::SIZE }> = Box<[MaybeUninit<u8>; N]>;
 
 /// A lightweight, fixed-size deque based on [`VecDeque`].
 ///
@@ -17,9 +21,9 @@ use std::rc::Rc;
 /// data or modify existing data.
 ///
 /// [`VecDeque`]: std::collections::VecDeque
-#[derive(Clone, Eq)]
+#[derive(Clone)]
 pub struct BlockDeque<const N: usize> {
-	buf: Rc<Box<[u8; N]>>,
+	buf: Rc<Block<N>>,
 	head: usize,
 	len: usize
 }
@@ -29,15 +33,8 @@ pub struct Iter<'a, T: 'a> {
 	b: slice::Iter<'a, T>,
 }
 
-pub fn buf<const N: usize>() -> Box<[u8; N]> {
-	// ~3x faster than new_zeroed and Box::new([0; N]) on my machine, when N is
-	// 8192, which makes sense, since we're not wasting cycles zeroing memory
-	// we're going to write to soon anyway. A speedup from 90ns to 30ns may not
-	// matter, that's fast enough and the whole point of this library is to
-	// minimize allocations, but why not?
-	// Safety: uninitialized values are never read, because length increments
-	//  only after pushing a value to that index, which is initialization.
-	unsafe { Box::<[_; N]>::new_uninit().assume_init() }
+pub fn buf<const N: usize>() -> Block<N> {
+	Box::new([MaybeUninit::uninit(); N])
 }
 
 fn split_range_mut<T>(slice: &mut [T], mut a: Range<usize>, mut b: Range<usize>) -> (&mut [T], &mut [T]) {
@@ -61,12 +58,17 @@ impl<const N: usize> BlockDeque<N> {
 	/// Creates a new deque.
 	pub fn new() -> Self { buf().into() }
 	pub fn from_array(array: [u8; N]) -> Self {
-		Self { buf: Box::new(array).into(), head: 0, len: N }
+		let buf = Block::new(
+			MaybeUninit::new(array).transpose()
+		).into();
+		Self { buf, head: 0, len: N }
 	}
 	/// Creates a new deque with bytes filling by `populate`.
-	pub fn populated(populate: impl FnOnce(&mut [u8; N]) -> usize) -> Self {
+	pub fn populated(populate: impl FnOnce(&mut [u8]) -> usize) -> Self {
 		let mut b = buf();
-		let len = populate(&mut b);
+		let len = populate(unsafe {
+			MaybeUninit::slice_assume_init_mut(&mut b[..])
+		});
 		Self {
 			buf: Rc::new(b),
 			head: 0,
@@ -84,12 +86,18 @@ impl<const N: usize> BlockDeque<N> {
 	pub fn is_full(&self) -> bool { self.len == N }
 	/// Returns `true` if the deque contains shared data.
 	pub fn is_shared(&self) -> bool { Rc::strong_count(&self.buf) != 1 }
+	/// Returns `true` if the segment is contiguous.
+	pub fn is_contiguous(&self) -> bool {
+		// Unlike with VecDeque, the capacity is checked by the compiler, so this
+		// cannot overflow.
+		self.head + self.len <= N
+	}
 
 	/// Returns a reference to the element at `index`.
 	pub fn get(&self, index: usize) -> Option<&u8> {
-		(index < self.len).then(||
-			&self.buf[self.wrap(index)]
-		)
+		(index < self.len).then(|| unsafe {
+			MaybeUninit::assume_init_ref(&self.buf[self.wrap(index)])
+		})
 	}
 
 	/// Returns a mutable reference to the element at `index`.
@@ -139,14 +147,23 @@ impl<const N: usize> BlockDeque<N> {
 	/// or `None` if the deque is shared.
 	pub fn as_mut_slices(&mut self) -> Option<(&mut [u8], &mut [u8])> {
 		let (a, b) = self.slice_ranges(.., self.len);
-		self.buf().map(|buf| split_range_mut(buf, a, b))
+		self.buf().map(|buf| {
+			let (a, b) = split_range_mut(buf, a, b);
+			unsafe {
+				(MaybeUninit::slice_assume_init_mut(a),
+				 MaybeUninit::slice_assume_init_mut(b))
+			}
+		})
 	}
 
 	/// Returns a pair of slices which contain the contents of the deque within
 	/// `range`.
 	pub fn as_slices_in_range<R: RangeBounds<usize>>(&self, range: R) -> (&[u8], &[u8]) {
 		let (a, b) = self.slice_ranges(range, self.len);
-		(&self.buf[a], &self.buf[b])
+		unsafe {
+			(MaybeUninit::slice_assume_init_ref(&self.buf[a]),
+			 MaybeUninit::slice_assume_init_ref(&self.buf[b]))
+		}
 	}
 
 	/// Clears the deque.
@@ -161,7 +178,9 @@ impl<const N: usize> BlockDeque<N> {
 			let head = self.head;
 			self.head = self.wrap(1);
 			self.len -= 1;
-			self.buf[head]
+			unsafe {
+				self.buf[head].assume_init()
+			}
 		})
 	}
 
@@ -169,7 +188,9 @@ impl<const N: usize> BlockDeque<N> {
 	pub fn pop_back(&mut self) -> Option<u8> {
 		(!self.is_empty()).then(|| {
 			self.len -= 1;
-			self.buf[self.wrap(self.len)]
+			unsafe {
+				self.buf[self.wrap(self.len)].assume_init()
+			}
 		})
 	}
 
@@ -205,7 +226,7 @@ impl<const N: usize> BlockDeque<N> {
 		if self.is_empty() {
 			let buf = self.buf()?;
 			let len = values.len().min(N);
-			buf[..len].copy_from_slice(&values[..len]);
+			buf[..len].copy_from_slice(unsafe { mem::transmute(&values[..len]) });
 			self.head = 0;
 			self.len = len;
 			return Some(len)
@@ -220,7 +241,7 @@ impl<const N: usize> BlockDeque<N> {
 			let buf = self.buf()?;
 			let dst = &mut buf[back_idx..N];
 			let len = min(dst.len(), values.len());
-			dst[..len].copy_from_slice(&values[..len]);
+			dst[..len].copy_from_slice(unsafe { mem::transmute(&values[..len]) });
 			values = &values[len..];
 			self.len += len;
 			count = len;
@@ -232,7 +253,7 @@ impl<const N: usize> BlockDeque<N> {
 			let buf = self.buf()?;
 			let dst = &mut buf[back_idx..head];
 			let len = min(dst.len(), values.len());
-			dst[..len].copy_from_slice(&values[..len]);
+			dst[..len].copy_from_slice(unsafe { mem::transmute(&values[..len]) });
 			self.len += len;
 			count += len;
 		}
@@ -274,6 +295,17 @@ impl<const N: usize> BlockDeque<N> {
 	pub fn truncate(&mut self, count: usize) {
 		assert!(count <= self.len);
 		self.len = count;
+	}
+
+	/// Sets the deque length to `len`.
+	///
+	/// # Safety
+	///
+	/// Setting the length beyond the bounds of written bytes is undefined behavior,
+	/// and could add uninitialized bytes.
+	pub unsafe fn set_len(&mut self, len: usize) {
+		assert_le!(len, N);
+		self.len = len;
 	}
 
 	/// Shifts the internal memory of the deque such that it fits it one contiguous
@@ -325,27 +357,47 @@ impl<const N: usize> BlockDeque<N> {
 		self.index_mut(head..head + len)
 	}
 
+	/// Returns the remaining spare capacity of the deque as a pair of `MaybeUninit`
+	/// slices. This can be used to fill the deque with data, before marking it as
+	/// initialized with [`set_len`]. If the deque is shared, both slices will be
+	/// empty.
+	///
+	/// This is not marked unsafe, because it has no effect on invariants without
+	/// [`set_len`].
+	///
+	/// [`set_len`]: Self::set_len
+	pub fn spare_capacity_mut(&mut self) -> (&mut [MaybeUninit<u8>], &mut [MaybeUninit<u8>]) {
+		if self.is_empty() {
+			self.clear();
+		}
+		
+		let (a, b) = self.spare_capacity_ranges();
+		let Some(buf) = self.buf() else {
+			return (&mut [], &mut [])
+		};
+		split_range_mut(buf, a, b)
+	}
+
 	/// Consumes the deque, returning inner buffer if *exclusive* (unshared). The
 	/// elements of this array are possibly uninitialized; this method is provided
 	/// for pools to collect this memory and pass it back to this struct, where
 	/// initialization is properly handled.
-	pub fn into_inner(self) -> Option<Box<[u8; N]>> { Rc::into_inner(self.buf) }
+	pub fn into_inner(self) -> Option<Box<[MaybeUninit<u8>; N]>> { Rc::into_inner(self.buf) }
 }
 
 impl<const N: usize> BlockDeque<N> {
 	fn index_mut<I, T: ?Sized>(&mut self, idx: I) -> Option<&mut T>
-	where [u8; N]: IndexMut<I, Output = T> {
-		self.buf().map(|array| &mut array[idx])
+	where [u8]: IndexMut<I, Output = T> {
+		self.buf().map(|array| {
+			let array = unsafe {
+				MaybeUninit::slice_assume_init_mut(array)
+			};
+			&mut array[idx]
+		})
 	}
 
-	fn buf(&mut self) -> Option<&mut [u8; N]> {
+	fn buf(&mut self) -> Option<&mut [MaybeUninit<u8>; N]> {
 		Rc::get_mut(&mut self.buf).map(Box::as_mut)
-	}
-
-	fn is_contiguous(&self) -> bool {
-		// Unlike with VecDeque, the capacity is checked by the compiler, so this
-		// cannot overflow.
-		self.head + self.len <= N
 	}
 
 	fn wrap(&self, idx: usize) -> usize {
@@ -383,15 +435,24 @@ impl<const N: usize> BlockDeque<N> {
 			}
 		}
 	}
+
+	fn spare_capacity_ranges(&self) -> (Range<usize>, Range<usize>) {
+		let back_idx = self.wrap(self.len);
+		if back_idx > self.head {
+			(back_idx..N, 0..self.head)
+		} else {
+			(back_idx..self.head, 0..0)
+		}
+	}
 }
 
 impl<const N: usize> Default for BlockDeque<N> {
 	fn default() -> Self { Self::new() }
 }
 
-impl<const N: usize> From<Box<[u8; N]>> for BlockDeque<N> {
-	fn from(buf: Box<[u8; N]>) -> Self {
-		Self { buf: Rc::new(buf), head: 0, len: 0 }
+impl<const N: usize> From<Box<[MaybeUninit<u8>; N]>> for BlockDeque<N> {
+	fn from(buf: Box<[MaybeUninit<u8>; N]>) -> Self {
+		Self { buf: Rc::new(buf.into()), head: 0, len: 0 }
 	}
 }
 
@@ -449,6 +510,8 @@ impl<T> ExactSizeIterator for Iter<'_, T> {
 }
 
 impl<T> FusedIterator for Iter<'_, T> { }
+
+impl<const N: usize> Eq for BlockDeque<N> { }
 
 impl<const N: usize> PartialEq<[u8]> for BlockDeque<N> {
 	fn eq(&self, other: &[u8]) -> bool {

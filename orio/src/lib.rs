@@ -35,13 +35,17 @@
 	arbitrary_self_types,
 	associated_type_bounds,
 	associated_type_defaults,
+	can_vector,
+	core_io_borrowed_buf,
 	extend_one,
 	extract_if,
 	generic_const_exprs,
 	int_roundings,
 	iter_is_partitioned,
-	new_uninit,
+	maybe_uninit_slice,
+	maybe_uninit_uninit_array_transpose,
 	pattern,
+	read_buf,
 	seek_stream_len,
 	slice_as_chunks,
 	slice_index_methods,
@@ -62,8 +66,10 @@ mod element;
 pub mod pool;
 mod util;
 pub mod pattern;
+mod std_io;
 
 pub use error::*;
 pub use buffer::*;
 pub use byte_str::*;
 pub use segment::*;
+pub use std_io::*;

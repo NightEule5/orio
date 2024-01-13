@@ -10,9 +10,10 @@ pub(crate) use ring::*;
 use std::cmp::min;
 use std::ops::{Index, RangeBounds};
 use std::{mem, slice};
+use std::mem::MaybeUninit;
 use all_asserts::assert_gt;
 use block_deque::BlockDeque;
-pub(crate) use block_deque::buf as alloc_block;
+pub(crate) use block_deque::{buf as alloc_block, Block};
 use buffer::Buf;
 use util::SliceExt;
 use crate::pool::Pool;
@@ -78,12 +79,22 @@ impl<'d, const N: usize> Seg<'d, N> {
 	/// Returns `true` if the segment is full.
 	pub fn is_full(&self) -> bool { self.limit() == 0 }
 	/// Returns `true` if the segment contains shared data and cannot be written to.
+	/// Opposite of [`is_exclusive`].
+	///
+	/// [`is_exclusive`]: Self::is_exclusive
 	pub fn is_shared(&self) -> bool {
 		match &self.0 {
 			Buf::Block(block) => block.is_shared(),
 			Buf::Boxed(boxed) => boxed.is_shared(),
 			Buf::Slice(_    ) => true,
 		}
+	}
+	/// Returns `true` if the segment contains exclusively-owned data and can be
+	/// written to. Opposite of [`is_shared`].
+	///
+	/// [`is_shared`]: Self::is_shared
+	pub fn is_exclusive(&self) -> bool {
+		!self.is_shared()
 	}
 
 	/// Clears data from the segment.
@@ -311,7 +322,7 @@ impl<'d, const N: usize> Seg<'d, N> {
 	/// Consumes the segment and returns its inner block of memory, if any. This is
 	/// intended for use by pool implementations to collect only blocks and discard
 	/// shared data.
-	pub fn into_block(self) -> Option<Box<[u8; N]>> {
+	pub fn into_block(self) -> Option<Box<[MaybeUninit<u8>; N]>> {
 		if let Buf::Block(block) = self.0 {
 			block.into_inner()
 		} else {
@@ -322,6 +333,25 @@ impl<'d, const N: usize> Seg<'d, N> {
 	/// Iterates over bytes in the segment.
 	pub fn iter(&self) -> impl Iterator<Item = &u8> + '_ {
 		self.0.iter()
+	}
+}
+
+impl<'a, const N: usize> Seg<'a, N> {
+	pub(crate) unsafe fn set_len(&mut self, count: usize) {
+		let Buf::Block(block) = &mut self.0 else { return };
+		block.set_len(count)
+	}
+
+	pub(crate) unsafe fn inc_len(&mut self, count: usize) {
+		let Buf::Block(block) = &mut self.0 else { return };
+		block.set_len(block.len() + count);
+	}
+
+	pub(crate) fn spare_capacity_mut(&mut self) -> (&mut [MaybeUninit<u8>], &mut [MaybeUninit<u8>]) {
+		let Buf::Block(block) = &mut self.0 else {
+			return (&mut [], &mut [])
+		};
+		block.spare_capacity_mut()
 	}
 }
 

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::vec_deque;
+use std::io;
+use std::io::{BorrowedBuf, ErrorKind, IoSliceMut, Read};
+use std::iter::FilterMap;
+use std::mem::MaybeUninit;
+use std::ops::RangeTo;
 use crate::{Buffer, BufferResult, ResultContext, Seg, StreamResult as Result};
-use crate::BufferContext::Drain;
+use crate::BufferContext::{Drain, Fill};
 use crate::streams::{BufSink, BufSource, Sink};
 use crate::pool::Pool;
 use crate::segment::RBuf;
@@ -69,11 +75,184 @@ impl<'d, const N: usize, P: Pool<N>> BufSink<'d, N> for Buffer<'d, N, P> {
 	}
 }
 
+/// Iterates over writable segments in a buffer, returning mutable slices of their
+/// spare capacity.
+struct SpareCapacityIter<'a: 'b, 'b, const N: usize> {
+	seg_count: usize,
+	rem_count: usize,
+	seg_iter: vec_deque::IterMut<'b, Seg<'a, N>>,
+	last_slice: Option<&'b mut [MaybeUninit<u8>]>,
+}
+
+impl<'a: 'b, 'b, const N: usize> Iterator for SpareCapacityIter<'a, 'b, N> {
+	type Item = &'b mut [MaybeUninit<u8>];
+
+	fn next(&mut self) -> Option<Self::Item> {
+		let mut slice = self.last_slice.take().or_else(|| {
+			let (a, b) = self.seg_iter.next()?.spare_capacity_mut();
+			self.seg_count -= 1;
+			self.last_slice = Some(b);
+			Some(a)
+		})?;
+
+		if self.seg_count == 0 {
+			let len = self.rem_count.min(slice.len());
+			slice = &mut slice[..len];
+			self.rem_count -= len;
+		}
+		Some(slice)
+	}
+
+	fn size_hint(&self) -> (usize, Option<usize>) {
+		let len = self.len();
+		(len, Some(len))
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> ExactSizeIterator for SpareCapacityIter<'a, 'b, N> {
+	fn len(&self) -> usize {
+		let len = self.seg_iter.len() * 2;
+		if self.last_slice.is_some() {
+			len + 1
+		} else {
+			len
+		}
+	}
+}
+
+impl<'a: 'b, 'b, const N: usize> SpareCapacityIter<'a, 'b, N> {
+	fn collect_io_slices(self) -> Vec<IoSliceMut<'b>> {
+		self.map(|slice|
+				IoSliceMut::new(unsafe {
+					// Safety: IO slices are only written to, never read.
+					MaybeUninit::slice_assume_init_mut(slice)
+				})
+			)
+			.collect()
+	}
+
+	fn map_into_bufs(self) -> FilterMap<Self, fn(&'b mut [MaybeUninit<u8>]) -> Option<BorrowedBuf<'b>>> {
+		self.filter_map(|b| (!b.is_empty()).then_some(b.into()))
+	}
+}
+
+impl<'a, const N: usize, P: Pool<N>> Buffer<'a, N, P> {
+	fn spare_capacity(
+		&mut self,
+		RangeTo { end }: RangeTo<usize>
+	) -> SpareCapacityIter<'a, '_, N> {
+		let (seg_count, rem_count) = self.data.count_writable(end);
+		SpareCapacityIter {
+			seg_count,
+			rem_count,
+			seg_iter: self.data.iter_writable(seg_count),
+			last_slice: None,
+		}
+	}
+
+	/// Fills the buffer by reading up to `count` bytes from a `reader`, stopping
+	/// when no bytes are read. May optionally use [`Read::read_vectored`] if the
+	/// reader supports it, currently to read into spare capacity.
+	pub(crate) fn fill_from_reader(
+		&mut self,
+		reader: &mut impl Read,
+		count: usize,
+		allow_vectored: bool,
+	) -> BufferResult<usize> {
+		if count == 0 {
+			return Ok(0)
+		}
+
+		let mut read = self.fill_spare_from_reader(reader, count, allow_vectored)?;
+		if read >= count || read == 0 {
+			return Ok(read)
+		}
+
+		// Read in block-sized chunks until count is reached, an error occurs, or
+		// the reader stops reading any more bytes.
+		let mut cur_read = 0;
+		while read < count {
+			let remaining = count - read;
+			if self.reserve(remaining.min(N)).is_err() {
+				break
+			}
+
+			let mut seg = self.data.back_mut().unwrap();
+			let (mut slice, _) = seg.spare_capacity_mut();
+			let len = remaining.min(slice.len());
+			slice = &mut slice[..len];
+			let result = read_into_buf(reader, slice.into(), &mut cur_read);
+			read += cur_read;
+			unsafe {
+				seg.inc_len(cur_read);
+			}
+			result?;
+
+			if cur_read == 0 {
+				break
+			}
+		}
+		Ok(read)
+	}
+
+	pub(crate) fn fill_spare_from_reader(
+		&mut self,
+		reader: &mut impl Read,
+		count: usize,
+		allow_vectored: bool,
+	) -> BufferResult<usize> {
+		let spare = self.spare_capacity(..count);
+		let mut read = 0;
+		let result = if allow_vectored && reader.is_read_vectored() {
+			// Todo: benchmark to determine whether the overhead of allocating a
+			//  vector outweighs the speedup of vectored reads.
+			reader.read_vectored(&mut spare.collect_io_slices())
+				  .map(|cur_read| read += cur_read)
+		} else {
+			try {
+				for buf in spare.map_into_bufs() {
+					read_into_buf(reader, buf, &mut read)?
+				}
+			}
+		};
+
+		unsafe {
+			self.data.grow(read);
+		}
+		result.context(Fill)?;
+		Ok(read)
+	}
+}
+
+fn read_into_buf(reader: &mut impl Read, mut buf: BorrowedBuf, count: &mut usize) -> io::Result<()> {
+	let mut written;
+	let result = try {
+		while buf.len() < buf.capacity() {
+			let mut cursor = buf.unfilled();
+			written = cursor.written();
+			match reader.read_buf(cursor.reborrow()) {
+				Ok(_) => {
+					*count += cursor.written();
+					if cursor.written() == written {
+						// No more bytes read.
+						break
+					}
+				}
+				Err(e) if e.kind() == ErrorKind::Interrupted => { }
+				error => {
+					*count += cursor.written();
+					error?
+				}
+			};
+		}
+	};
+	result
+}
+
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	fn write_back(&mut self, data: &mut &[u8], expect: &str) -> usize {
-		let mut seg = self.pop_back().expect(expect);
+		let mut seg = self.back_mut().expect(expect);
 		let written = seg.write(data).expect("back segment should be writable");
-		self.push_back(seg);
 		*data = &data[written..];
 		written
 	}

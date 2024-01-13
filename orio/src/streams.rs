@@ -453,23 +453,28 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 			.map(Into::into)
 	}
 
-	/// Reads UTF-8 bytes into `buf` until the `terminator` pattern, returning the
-	/// number of bytes read and whether the pattern was found. If a decode error
-	/// occurs, no data is consumed and `buf` will contain the last valid data.
-	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
-		//self.read_spec(|src| src.read_utf8_until(buf, terminator))
-		//	.map(Into::into)
-		todo!()
-	}
-
-	/// Reads UTF-8 bytes into `buf` until and including the `terminator` pattern,
+	/// Reads buffered UTF-8 bytes into `buf` until the `terminator` pattern,
 	/// returning the number of bytes read and whether the pattern was found. If a
 	/// decode error occurs, no data is consumed and `buf` will contain the last
 	/// valid data.
+	///
+	/// Note that, unlike methods like [`read_utf8_line`], this method only acts on
+	/// buffered bytes. This is because the terminator pattern must be moved, so it
+	/// cannot be used in a loop. This constraint may be lifted in the future.
+	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
+		self.buf_mut().read_utf8_until(buf, terminator)
+	}
+
+	/// Reads buffered UTF-8 bytes into `buf` until and including the `terminator`
+	/// pattern, returning the number of bytes read and whether the pattern was
+	/// found. If a decode error occurs, no data is consumed and `buf` will contain
+	/// the last valid data.
+	///
+	/// Note that, unlike methods like [`read_utf8_line`], this method only acts on
+	/// buffered bytes. This is because the terminator pattern must be moved, so it
+	/// cannot be used in a loop. This constraint may be lifted in the future.
 	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
-		//self.read_spec(|src| src.read_utf8_until_inclusive(buf, terminator))
-		//	.map(Into::into)
-		todo!()
+		self.buf_mut().read_utf8_until_inclusive(buf, terminator)
 	}
 }
 

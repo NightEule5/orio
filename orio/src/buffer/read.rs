@@ -132,6 +132,9 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		self.read_utf8_until_inclusive(buf, LineTerminator)
 	}
 
+	/// Reads UTF-8 bytes into `buf` until the `terminator` pattern, returning the
+	/// number of bytes read and whether the pattern was found. If a decode error
+	/// occurs, no data is consumed and `buf` will contain the last valid data.
 	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		if let Some(range) = self.find(terminator) {
 			let count = self.read_utf8(buf, range.start)?;
@@ -143,6 +146,10 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		}
 	}
 
+	/// Reads UTF-8 bytes into `buf` until and including the `terminator` pattern,
+	/// returning the number of bytes read and whether the pattern was found. If a
+	/// decode error occurs, no data is consumed and `buf` will contain the last
+	/// valid data.
 	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		if let Some(range) = self.find(terminator) {
 			self.read_utf8(buf, range.end)

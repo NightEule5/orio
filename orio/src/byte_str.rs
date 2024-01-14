@@ -1,46 +1,67 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cmp::min;
-use std::ops::{Add, RangeBounds};
-use std::slice;
-use base64::Engine;
-use base64::engine::GeneralPurpose;
-use base64::prelude::{BASE64_STANDARD_NO_PAD, BASE64_URL_SAFE_NO_PAD};
-use simdutf8::compat::{from_utf8, Utf8Error};
-use crate::segment::SegRing;
-use crate::streams::OffsetUtf8Error;
+mod hash;
+mod encoding;
+
+use std::borrow::{Borrow, BorrowMut, Cow};
+use std::ops::{Add, Index, IndexMut, RangeBounds};
+use std::{fmt, slice};
+use std::slice::SliceIndex;
+use simdutf8::compat::{from_utf8};
+use crate::segment::RBuf;
+use crate::{Seg, Utf8Error};
+use crate::util::partial_utf8::read_partial_utf8_into;
+pub use encoding::EncodeBytes;
 
 /// A borrowed, segmented string of bytes.
-#[derive(Clone, Debug, Default, Eq)]
-pub struct ByteStr<'b> {
-	utf8: Option<String>,
-	data: Vec<&'b [u8]>,
+#[derive(Clone, Eq)]
+pub struct ByteStr<'a> {
+	utf8: Option<Cow<'a, str>>,
+	data: Vec<&'a [u8]>,
 	len: usize,
 }
 
-impl<'t> ByteStr<'t> {
+impl<'a> ByteStr<'a> {
 	/// Creates a byte string from `str`.
-	pub fn from_utf8(str: &'t str) -> Self {
+	pub fn from_utf8(str: &'a str) -> Self {
 		Self {
-			utf8: None,
+			utf8: Some(str.into()),
 			data: vec![str.as_bytes()],
 			len: str.len(),
 		}
 	}
 }
 
+impl<'a> Default for ByteStr<'a> {
+	fn default() -> Self {
+		Self {
+			utf8: Some(Cow::Borrowed("")),
+			data: Vec::new(),
+			len: 0,
+		}
+	}
+}
+
 impl ByteStr<'_> {
 	/// Creates an empty byte string.
-	pub fn empty() -> Self { Self::default() }
+	#[inline]
+	pub fn new() -> Self { Self::default() }
 
 	/// Returns the length in bytes of the byte string.
+	#[inline]
 	pub fn len(&self) -> usize { self.len }
+	/// Returns `true` if the byte string is empty.
+	#[inline]
+	pub fn is_empty(&self) -> bool { self.len == 0 }
+	/// Returns `true` if the byte string is not empty.
+	#[inline]
+	pub fn is_not_empty(&self) -> bool { self.len > 0 }
 
 	/// Returns the byte at `index`, or `None` if `index` is out of bounds.
-	pub fn get(&mut self, mut index: usize) -> Option<u8> {
+	pub fn get(&self, mut index: usize) -> Option<&u8> {
 		for chunk in self.data.iter() {
 			if index < chunk.len() {
-				return Some(chunk[index])
+				return Some(&chunk[index])
 			}
 
 			index -= chunk.len();
@@ -49,68 +70,68 @@ impl ByteStr<'_> {
 		None
 	}
 
+	/// Returns a byte string borrowing bytes within `range` from this byte string.
+	pub fn range<R: RangeBounds<usize>>(&self, range: R) -> ByteStr {
+		let Self { utf8, data, len } = self;
+		let range = slice::range(range, ..*len);
+		let utf8 = utf8.as_ref().map(|str| (&str[range.clone()]).into());
+
+		let mut front_skip = range.start;
+		let skip_len = data.iter().take_while(|&&slice|
+			front_skip >= slice.len() && {
+				front_skip -= slice.len();
+				true
+			}
+		).count();
+		let mut take = range.len();
+		let substr = data[skip_len..].iter().map_while(|&slice| {
+			if front_skip > 0 {
+				let slice = &slice[front_skip..];
+				front_skip = 0;
+				Some(slice)
+			} else if take > 0 {
+				let slice = &slice[..take.min(slice.len())];
+				take -= slice.len();
+				Some(slice)
+			} else {
+				None
+			}
+		}).collect();
+		ByteStr { utf8, ..substr }
+	}
+
 	/// Decodes and caches the bytes as UTF-8, returning a borrow of the cache.
 	/// Subsequent calls to this function will borrow from the cache, and calls to
 	/// [`utf8`][] will clone from it.
 	///
 	/// [`utf8`]: Self::utf8
-	pub fn utf8_cache(&mut self) -> Result<&str, OffsetUtf8Error> {
-		let Some(ref utf8) = self.utf8 else {
-			return Ok(self.utf8.insert(self.utf8()?))
-		};
-
-		Ok(utf8)
+	pub fn utf8_cache(&mut self) -> Result<&str, Utf8Error> {
+		Ok(
+			match self.utf8 {
+				Some(ref utf8) => utf8,
+				None => self.utf8.insert(self.utf8()?.into())
+			}
+		)
 	}
 
 	/// Returns a string of UTF-8-decoded bytes, cloning from the value cached by
 	/// [`utf8_cache`][] if any.
 	///
 	/// [`utf8_cache`]: Self::utf8_cache
-	pub fn utf8(&self) -> Result<String, OffsetUtf8Error> {
-		let Some(ref utf8) = self.utf8 else {
-			let mut str = String::default();
-			for data in self.data.iter() {
-				str.push_str(
-					from_utf8(data).map_err(|err|
-						OffsetUtf8Error::new(err, str.len())
-					)?
-				)
-			}
-
-			return Ok(str)
+	pub fn utf8(&self) -> Result<String, Utf8Error> {
+		let Some(utf8) = self.utf8.as_ref() else {
+			let mut buf = String::with_capacity(self.len);
+			read_partial_utf8_into(self.data.iter().copied(), &mut buf)?;
+			return Ok(buf)
 		};
 
-		Ok(utf8.clone())
+		Ok(utf8.clone().into_owned())
 	}
 
-	/// Encodes data into a Base64 string.
-	pub fn base64(&self) -> String { self.encode(BASE64_STANDARD_NO_PAD) }
-
-	/// Encodes data into a Base64 URL string.
-	pub fn base64_url(&self) -> String { self.encode(BASE64_URL_SAFE_NO_PAD) }
-
-	/// Encodes data into a lowercase hex string.
-	pub fn hex_lower(&self) -> String { self.encode(Base16Encoder::<false>) }
-
-	/// Encodes data into an uppercase hex string.
-	pub fn hex_upper(&self) -> String { self.encode(Base16Encoder::<true>) }
-
-	fn encode<'b, E: Encoder + Into<RollingEncoder<'b, E>>>(&'b self, encoder: E) -> String {
-		let Self { data, .. } = self;
-		let mut dst = String::default();
-
-		if data.len() == 1 {
-			encoder.encode_data(data[0], &mut dst);
-			dst
-		} else {
-			let mut enc = encoder.into();
-			for data in data {
-				enc.encode(data, &mut dst);
-			}
-
-			enc.finish(&mut dst);
-			dst
-		}
+	/// Returns the cached UTF-8 representation of the data, or `None` if the data
+	/// has not been decoded.
+	pub fn cached_utf8(&self) -> Option<&str> {
+		self.utf8.as_deref()
 	}
 
 	/// Clones the borrowed data into an owned [`ByteString`].
@@ -123,55 +144,92 @@ impl ByteStr<'_> {
 			}
 		).into()
 	}
+}
 
-	pub(crate) fn iter(&self) -> impl Iterator<Item = &[u8]> + '_ {
+impl<'a> ByteStr<'a> {
+	/// Returns the internal data.
+	pub fn into_vec(self) -> Vec<&'a [u8]> {
+		self.data
+	}
+
+	pub(crate) fn iter(&self) -> impl Iterator<Item = &'a [u8]> + '_ {
 		self.data
 			.iter()
-			.cloned()
+			.copied()
+	}
+}
+
+impl fmt::Debug for ByteStr<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let mut dbg = f.debug_struct("ByteStr");
+		if let Some(utf8) = self.cached_utf8() {
+			dbg.field("data", &utf8);
+		} else {
+			dbg.field("data", &self.data);
+		}
+		dbg.finish_non_exhaustive()
+	}
+}
+
+impl Index<usize> for ByteStr<'_> {
+	type Output = u8;
+
+	fn index(&self, index: usize) -> &Self::Output {
+		self.get(index)
+			.expect(
+				&format!(
+					"index {index} should be less than the byte string length {}",
+					self.len
+				)
+			)
 	}
 }
 
 impl PartialEq for ByteStr<'_> {
 	fn eq(&self, other: &Self) -> bool {
-		if self.len != other.len {
-			return false
-		}
-
-		for (a, b) in self.iter().flatten().zip(other.iter().flatten()) {
-			if a != b {
-				return false
+		if let (&[a], &[b]) = (self.as_ref(), other.as_ref()) {
+			a == b
+		} else if self.len != other.len {
+			false
+		} else {
+			for (a, b) in self.iter().flatten().zip(other.iter().flatten()) {
+				if a != b {
+					return false
+				}
 			}
-		}
 
-		true
+			true
+		}
 	}
 }
 
 impl PartialEq<[u8]> for ByteStr<'_> {
 	fn eq(&self, other: &[u8]) -> bool {
-		if self.len != other.len() {
-			return false
-		}
-
-		for (a, b) in self.iter().flatten().zip(other) {
-			if a != b {
-				return false
+		if let &[data] = self.as_ref() {
+			data == other
+		} else if self.len != other.len() {
+			false
+		} else {
+			for (a, b) in self.iter().flatten().zip(other) {
+				if a != b {
+					return false
+				}
 			}
-		}
 
-		true
+			true
+		}
 	}
 }
 
 impl PartialEq<ByteString> for ByteStr<'_> {
 	fn eq(&self, other: &ByteString) -> bool {
-		self == other.data.as_slice()
+		self == other.as_ref()
 	}
 }
 
-impl<'b> From<Vec<&'b [u8]>> for ByteStr<'b> {
-	fn from(data: Vec<&'b [u8]>) -> Self {
-		let len = data.iter().map(|v| v.len()).sum();
+impl<'a> From<Vec<&'a [u8]>> for ByteStr<'a> {
+	fn from(data: Vec<&'a [u8]>) -> Self {
+		let len = data.iter().copied().map(<[u8]>::len).sum();
 		Self {
 			utf8: None,
 			data,
@@ -180,19 +238,38 @@ impl<'b> From<Vec<&'b [u8]>> for ByteStr<'b> {
 	}
 }
 
-impl<'b> From<&'b [u8]> for ByteStr<'b> {
-	fn from(value: &'b [u8]) -> Self {
+impl<'a> From<&'a [u8]> for ByteStr<'a> {
+	fn from(value: &'a [u8]) -> Self {
 		Self::from(vec![value])
 	}
 }
 
-impl<'b> From<&'b SegRing> for ByteStr<'b> {
-	fn from(value: &'b SegRing) -> Self {
+impl<'a, const N: usize> From<&'a RBuf<Seg<'a, N>>> for ByteStr<'a> {
+	fn from(value: &'a RBuf<Seg<'a, N>>) -> Self {
 		Self {
 			utf8: None,
-			data: value.slices().collect(),
+			data: value.iter_slices().collect(),
 			len: value.count(),
 		}
+	}
+}
+
+impl<'a> FromIterator<&'a [u8]> for ByteStr<'a> {
+	fn from_iter<T: IntoIterator<Item = &'a [u8]>>(iter: T) -> Self {
+		let data: Vec<_> = iter.into_iter().collect();
+		data.into()
+	}
+}
+
+impl<'a> AsRef<[&'a [u8]]> for ByteStr<'a> {
+	fn as_ref(&self) -> &[&'a [u8]] {
+		&self.data
+	}
+}
+
+impl<'a> Borrow<[&'a [u8]]> for ByteStr<'a> {
+	fn borrow(&self) -> &[&'a [u8]] {
+		&self.data
 	}
 }
 
@@ -202,7 +279,7 @@ impl Add for ByteStr<'_> {
 	fn add(mut self, Self { ref utf8, ref data, len }: Self) -> Self {
 		self.utf8 = if let Some(utf8_a) = self.utf8 {
 			if let Some(utf8_b) = utf8 {
-				Some(utf8_a.add(utf8_b))
+				Some(utf8_a.into_owned().add(utf8_b).into())
 			} else {
 				None
 			}
@@ -217,51 +294,49 @@ impl Add for ByteStr<'_> {
 }
 
 /// An owned string of bytes.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ByteString {
 	data: Vec<u8>
 }
 
 impl ByteString {
 	/// Creates an empty byte string.
-	pub fn empty() -> Self { Self::default() }
-
-	pub(crate) fn with_capacity(capacity: usize) -> Self {
-		Self { data: Vec::with_capacity(capacity) }
-	}
+	#[inline]
+	pub fn new() -> Self { Self::default() }
 
 	/// Returns the length in bytes of the byte string.
+	#[inline]
 	pub fn len(&self) -> usize { self.data.len() }
+	/// Returns `true` if the byte string is empty.
+	#[inline]
+	pub fn is_empty(&self) -> bool { self.len() == 0 }
+	/// Returns `true` if the byte string is not empty.
+	#[inline]
+	pub fn is_not_empty(&self) -> bool { self.len() > 0 }
 
 	/// Returns the byte at `index`, or `None` if `index` is out of bounds.
 	pub fn get(&mut self, index: usize) -> Option<u8> {
 		self.data.get(index).cloned()
 	}
 
+	/// Returns a slice of the byte string bounded by `range`.
+	pub fn range<R: RangeBounds<usize>>(&self, range: R) -> ByteStr<'_> {
+		let range = slice::range(range, ..self.len());
+		let slice = &self.as_slice()[range];
+		ByteStr {
+			utf8: None,
+			data: vec![slice],
+			len: slice.len(),
+		}
+	}
+
 	/// Returns a string of UTF-8-decoded bytes.
 	pub fn utf8(&self) -> Result<&str, Utf8Error> {
-		from_utf8(&self.data)
+		from_utf8(&self.data).map_err(Into::into)
 	}
 
-	/// Encodes data into a Base64 string.
-	pub fn base64(&self) -> String { self.encode(BASE64_STANDARD_NO_PAD) }
-
-	/// Encodes data into a Base64 URL string.
-	pub fn base64_url(&self) -> String { self.encode(BASE64_URL_SAFE_NO_PAD) }
-
-	/// Encodes data into a lowercase hex string.
-	pub fn hex_lower(&self) -> String { self.encode(Base16Encoder::<false>) }
-
-	/// Encodes data into an uppercase hex string.
-	pub fn hex_upper(&self) -> String { self.encode(Base16Encoder::<true>) }
-
-	fn encode<E: Encoder>(&self, encoder: E) -> String {
-		let mut dst = String::default();
-		encoder.encode_data(&self.data, &mut dst);
-		dst
-	}
-
-	pub(crate) fn extend_from_slice(&mut self, slice: &[u8]) {
+	/// Appends `slice` to the byte string.
+	pub fn extend_from_slice(&mut self, slice: &[u8]) {
 		self.data.extend_from_slice(slice);
 	}
 
@@ -276,135 +351,40 @@ impl ByteString {
 
 	/// Returns the internal data as a slice of bytes.
 	pub fn as_slice(&self) -> &[u8] { self.data.as_slice() }
+	/// Returns the internal data as a mutable slice of bytes.
+	pub fn as_mut_slice(&mut self) -> &mut [u8] { self.data.as_mut_slice() }
+	/// Returns the internal data.
+	pub fn into_bytes(self) -> Vec<u8> { self.data }
+}
 
-	/// Returns a slice of the byte string bounded by `range`.
-	pub fn substr<R: RangeBounds<usize>>(&self, range: R) -> ByteStr<'_> {
-		let range = slice::range(range, ..self.len());
-		let slice = &self.as_slice()[range];
-		ByteStr {
-			utf8: None,
-			data: vec![slice],
-			len: slice.len(),
-		}
+impl<I: SliceIndex<[u8]>> Index<I> for ByteString {
+	type Output = I::Output;
+
+	fn index(&self, index: I) -> &Self::Output {
+		index.index(self.as_slice())
 	}
 }
 
-#[cfg(feature = "hash")]
-impl ByteStr<'_> {
-	pub fn hash(&self, mut digest: impl digest::Digest) -> ByteString {
-		for data in &*self.data {
-			digest.update(data)
-		}
-		digest.finalize().as_slice().into()
+impl<I: SliceIndex<[u8]>> IndexMut<I> for ByteString {
+	fn index_mut(&mut self, index: I) -> &mut Self::Output {
+		index.index_mut(self.as_mut_slice())
 	}
 }
 
-#[cfg(feature = "hash")]
-impl ByteString {
-	pub fn hash(&self, mut digest: impl digest::Digest) -> Self {
-		digest.update(&self.data);
-		digest.finalize().as_slice().into()
-	}
-}
-
-macro_rules! hash_fn {
-    (secure $name:literal$fn:ident$module:ident$hasher:ident) => {
-		/// Computes a
-		#[doc = $name]
-		/// hash of the byte string. There are no known attacks for this hash
-		/// function; it can be considered suitable for cryptography.
-		pub fn $fn(&self) -> ByteString {
-			self.hash($module::$hasher::default())
-		}
-	};
-    (broken $name:literal$fn:ident$module:ident$hasher:ident) => {
-		/// Computes a
-		#[doc = $name]
-		/// hash of the byte string. This hash function has been broken; its use in
-		/// cryptography is ***not*** secure. Use for checksums only.
-		pub fn $fn(&self) -> ByteString {
-			self.hash($module::$hasher::default())
-		}
-	};
-}
-
-macro_rules! hash {
-    ($sec:tt$feature:literal$module:ident
-	$($size_name:literal$size_fn:ident$size_hasher:ident)+
-	) => {
-		#[cfg(feature = $feature)]
-		impl ByteString {
-			$(hash_fn! { $sec$size_name$size_fn$module$size_hasher })+
-		}
-		#[cfg(feature = $feature)]
-		impl ByteStr<'_> {
-			$(hash_fn! { $sec$size_name$size_fn$module$size_hasher })+
-		}
-	};
-}
-
-hash! {
-	secure "groestl" groestl
-	"Grøstl-224" groestl224 Groestl224
-	"Grøstl-256" groestl256 Groestl256
-	"Grøstl-384" groestl384 Groestl384
-	"Grøstl-512" groestl512 Groestl512
-}
-
-hash! {
-	broken "md5" md5
-	"MD5" md5 Md5
-}
-
-hash! {
-	broken "sha1" sha1
-	"SHA1" sha1 Sha1
-}
-
-hash! {
-	secure "sha2" sha2
-	"SHA-224" sha224 Sha224
-	"SHA-256" sha256 Sha256
-	"SHA-384" sha384 Sha384
-	"SHA-512" sha512 Sha512
-}
-
-hash! {
-	secure "sha3" sha3
-	"SHA3-224 (Keccak)" sha3_224 Sha3_224
-	"SHA3-256 (Keccak)" sha3_256 Sha3_256
-	"SHA3-384 (Keccak)" sha3_384 Sha3_384
-	"SHA3-512 (Keccak)" sha3_512 Sha3_512
-}
-
-hash! {
-	secure "shabal" shabal
-	"Shabal-192" shabal192 Shabal192
-	"Shabal-224" shabal224 Shabal224
-	"Shabal-256" shabal256 Shabal256
-	"Shabal-384" shabal384 Shabal384
-	"Shabal-512" shabal512 Shabal512
-}
-
-hash! {
-	secure "whirlpool" whirlpool
-	"Whirlpool" whirlpool Whirlpool
-}
-
-impl<'b> PartialEq<ByteStr<'b>> for ByteString {
-	fn eq(&self, other: &ByteStr<'b>) -> bool {
+impl<'a> PartialEq<ByteStr<'a>> for ByteString {
+	fn eq(&self, other: &ByteStr<'a>) -> bool {
 		other == self.as_slice()
 	}
 }
 
-impl<'b> From<&'b ByteString> for ByteStr<'b> {
-	fn from(value: &'b ByteString) -> Self {
+impl<'a> From<&'a ByteString> for ByteStr<'a> {
+	fn from(value: &'a ByteString) -> Self {
 		Self::from(value.as_slice())
 	}
 }
 
-impl<'b> From<&ByteStr<'b>> for ByteString {
-	fn from(value: &ByteStr<'b>) -> Self {
+impl<'a> From<&ByteStr<'a>> for ByteString {
+	fn from(value: &ByteStr<'a>) -> Self {
 		value.to_byte_string()
 	}
 }
@@ -429,104 +409,38 @@ impl FromIterator<u8> for ByteString {
 	}
 }
 
+impl<'a> FromIterator<&'a [u8]> for ByteString {
+	fn from_iter<T: IntoIterator<Item = &'a [u8]>>(iter: T) -> Self {
+		iter.into_iter()
+			.flatten()
+			.copied()
+			.collect()
+	}
+}
+
+impl Borrow<[u8]> for ByteString {
+	fn borrow(&self) -> &[u8] {
+		&self.data
+	}
+}
+
+impl BorrowMut<[u8]> for ByteString {
+	fn borrow_mut(&mut self) -> &mut [u8] {
+		&mut self.data
+	}
+}
+
 impl AsRef<[u8]> for ByteString {
 	fn as_ref(&self) -> &[u8] { &self.data }
+}
+
+impl AsMut<[u8]> for ByteString {
+	fn as_mut(&mut self) -> &mut [u8] { &mut self.data }
 }
 
 impl Extend<u8> for ByteString {
 	fn extend<T: IntoIterator<Item = u8>>(&mut self, iter: T) {
 		self.data.extend(iter)
-	}
-}
-
-trait Encoder {
-	fn encode_data(&self, input: &[u8], dst: &mut String);
-}
-
-impl Encoder for GeneralPurpose {
-	fn encode_data(&self, data: &[u8], dst: &mut String) {
-		self.encode_string(data, dst);
-	}
-}
-
-struct Base16Encoder<const UPPERCASE: bool>;
-
-impl Encoder for Base16Encoder<true> {
-	fn encode_data(&self, input: &[u8], dst: &mut String) {
-		dst.push_str(&base16ct::upper::encode_string(input))
-	}
-}
-
-impl Encoder for Base16Encoder<false> {
-	fn encode_data(&self, input: &[u8], dst: &mut String) {
-		dst.push_str(&base16ct::lower::encode_string(input))
-	}
-}
-
-/// Encodes slices as a multiple of `width`, rolling over the remainder into the
-/// next slice. This ensures segmented data will be encoded the same as equivalent
-/// contiguous data would be.
-struct RollingEncoder<'b, E: Encoder> {
-	width: usize,
-	rem: Option<&'b [u8]>,
-	enc: E,
-}
-
-impl<'b, E: Encoder> RollingEncoder<'b, E> {
-	fn encode(&mut self, mut data: &'b [u8], dst: &mut String) {
-		let width = self.width;
-
-		if let Some(value) = self.rem.take() {
-			let mut rem = Vec::with_capacity(width);
-			rem.extend_from_slice(value);
-
-			let len = min(width - value.len(), data.len());
-			rem.extend_from_slice(&data[..len]);
-			self.enc.encode_data(&rem, dst);
-			data = &data[len..];
-		}
-
-		let clean_len = data.len() / width * width;
-		if clean_len < data.len() {
-			let _ = self.rem.insert(&data[clean_len..]);
-		}
-
-		self.enc.encode_data(&data[..clean_len], dst);
-	}
-
-	fn finish(self, dst: &mut String) {
-		let Some(rem) = self.rem else { return };
-		self.enc.encode_data(rem, dst)
-	}
-}
-
-impl From<GeneralPurpose> for RollingEncoder<'_, GeneralPurpose> {
-	fn from(value: GeneralPurpose) -> Self {
-		Self {
-			width: 3,
-			rem: None,
-			enc: value,
-		}
-	}
-}
-
-impl From<Base16Encoder<true>> for RollingEncoder<'_, Base16Encoder<true>> {
-	fn from(value: Base16Encoder<true>) -> Self {
-		Self {
-			width: 2,
-			rem: None,
-			enc: value,
-		}
-	}
-}
-
-impl From<Base16Encoder<false>> for RollingEncoder<'_, Base16Encoder<false>> {
-	fn from(value: Base16Encoder<false>) -> Self {
-		Self {
-			width: 2,
-			rem: None,
-			enc: value,
-		}
 	}
 }
 
@@ -537,7 +451,7 @@ mod test {
 	use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 	use quickcheck::TestResult;
 	use quickcheck_macros::quickcheck;
-	use crate::{ByteStr, ByteString};
+	use crate::{ByteStr, ByteString, EncodeBytes};
 
 	#[quickcheck]
 	fn same_size_eq(data: Vec<u8>) {
@@ -578,10 +492,26 @@ mod test {
 		let (a, b) = data.split_at(split);
 		let bstr = ByteStr::from(a) + ByteStr::from(b);
 
-		assert_eq!(bstr.base64(),     STANDARD_NO_PAD.encode(&data), "standard base64");
-		assert_eq!(bstr.base64_url(), URL_SAFE_NO_PAD.encode(&data), "url-safe base64");
-		assert_eq!(bstr.hex_lower(), lower::encode_string(&data), "lowercase hex");
-		assert_eq!(bstr.hex_upper(), upper::encode_string(&data), "uppercase hex");
+		assert_eq!(
+			bstr.base64_string(),
+			STANDARD_NO_PAD.encode(&data),
+			"standard base64"
+		);
+		assert_eq!(
+			bstr.base64_url_string(),
+			URL_SAFE_NO_PAD.encode(&data),
+			"url-safe base64"
+		);
+		assert_eq!(
+			bstr.hex_lower_string(),
+			lower::encode_string(&data),
+			"lowercase hex"
+		);
+		assert_eq!(
+			bstr.hex_upper_string(),
+			upper::encode_string(&data),
+			"uppercase hex"
+		);
 		TestResult::passed()
 	}
 }

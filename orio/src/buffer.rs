@@ -2,141 +2,86 @@
 
 mod read;
 mod write;
+mod options;
 
-pub use read::*;
-pub use write::*;
+pub use options::*;
 
 use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
-use std::ops::{DerefMut, RangeBounds};
-use simdutf8::compat::from_utf8;
-use crate::pool::{SharedPool, DefaultPool, Pool};
-use crate::segment::{Segment, SegRing};
-use crate::{ByteStr, Context, expect, Result, ResultExt, SEGMENT_SIZE};
-use crate::streams::{BufSink, BufStream, Seekable, SeekOffset};
-use crate::streams::codec::Encode;
-use Context::{BufClear, BufCompact, BufCopy, BufRead, StreamSeek};
+use std::ops::{Range, RangeBounds};
+use all_asserts::assert_ge;
+use itertools::Itertools;
+use crate::pool::{DefaultPoolContainer, Pool, pool};
+use crate::{BufferResult as Result, ByteStr, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
+use crate::BufferContext::{Clear, Copy, Read, Reserve, Resize};
+use crate::pattern::Pattern;
+use crate::segment::RBuf;
+use crate::streams::{BufSink, BufStream, Seekable, SeekOffset, Stream};
+use crate::util::partial_utf8::*;
 
-#[derive(Copy, Clone, Debug)]
-pub struct BufferOptions {
-	/// The segment share threshold, the minimum size for a segment to be shared
-	/// rather than its data moved to another segment. Defaults to `1024B`, one
-	/// eighth the segment size. With a value is more than the segment size,
-	/// segments are never shared.
-	share_threshold: usize,
-	/// The retention ratio, the number of bytes of free space to be retained for
-	/// every filled segment. The buffer will collect or claim segments to maintain
-	/// at least this ratio. Defaults to one segment, or `8192B`.
-	retention_ratio: usize,
-	/// The fragmentation-compact threshold, the total size of fragmentation (gaps
-	/// where segments have been partially read or written to) that triggers compacting.
-	/// Defaults to `4096B`, half the segment size. With a value of `0`, the buffer
-	/// always compacts.
-	compact_threshold: usize,
-	/// Whether the buffer is "reluctant" to cause a fork (copy) shared memory. If
-	/// `false`, the buffer will always write to shared memory rather than claiming
-	/// a new segment to write to. Defaults to `true`.
-	is_fork_reluctant: bool,
-}
+// Todo: track how much space is reserved to keep empty segments after resize-on-read.
 
-impl Default for BufferOptions {
-	fn default() -> Self {
-		const SIZE: usize = SEGMENT_SIZE;
-
-		Self {
-			share_threshold: SIZE / 8,
-			retention_ratio: SIZE,
-			compact_threshold: SIZE / 2,
-			is_fork_reluctant: true,
-		}
-	}
-}
-
-impl BufferOptions {
-	/// Presets the options to create a "lean" buffer, a buffer that always shares,
-	/// returns all empty segments, always compacts, and always forks.
-	pub fn lean() -> Self {
-		Self {
-			share_threshold: 0,
-			retention_ratio: 0,
-			compact_threshold: 0,
-			is_fork_reluctant: true,
-		}
-	}
-	
-	/// Returns the segment share threshold.
-	pub fn share_threshold(&self) -> usize { self.share_threshold }
-	/// Returns the retention ratio.
-	pub fn retention_ratio(&self) -> usize { self.retention_ratio }
-	/// Returns the void-compact threshold.
-	pub fn compact_threshold(&self) -> usize { self.compact_threshold }
-	/// Returns whether the buffer will be "fork reluctant".
-	pub fn is_fork_reluctant(&self) -> bool { self.is_fork_reluctant }
-
-	/// Sets the segment share threshold.
-	pub fn set_share_threshold(mut self, value: usize) -> Self {
-		self.share_threshold = value;
-		self
-	}
-
-	/// Sets the retention ratio.
-	pub fn set_retention_ratio(mut self, value: usize) -> Self {
-		self.retention_ratio = value;
-		self
-	}
-
-	/// Sets the void-compact threshold.
-	pub fn set_compact_threshold(mut self, value: usize) -> Self {
-		self.compact_threshold = value;
-		self
-	}
-
-	/// Sets whether the buffer should be "fork reluctant".
-	pub fn set_fork_reluctant(mut self, value: bool) -> Self {
-		self.is_fork_reluctant = value;
-		self
-	}
-}
+pub type DefaultBuffer<'d> = Buffer<'d>;
 
 /// A dynamically-resizing byte buffer which borrows and returns pool memory as
 /// needed.
-pub struct Buffer<P: SharedPool = DefaultPool> {
+#[derive(Clone, Eq)]
+pub struct Buffer<
+	'd,
+	const N: usize = 8192,
+	P: Pool<N> = DefaultPoolContainer
+> {
+	data: RBuf<Seg<'d, N>>,
 	pool: P,
-	segments: SegRing,
-	options: BufferOptions,
+	share_threshold: usize,
+	borrow_threshold: usize,
+	allocation: Allocate,
 }
 
-impl Default for Buffer {
-	fn default() -> Self { Self::new(DefaultPool::get()) }
+impl<const N: usize, P: Pool<N>> Default for Buffer<'_, N, P> {
+	fn default() -> Self { BufferOptions::default().into() }
 }
 
-impl<P: SharedPool> Debug for Buffer<P> {
+impl<const N: usize, P: Pool<N>> From<BufferOptions> for Buffer<'_, N, P> {
+	fn from(options: BufferOptions) -> Self {
+		Self::new(P::get(), options)
+	}
+}
+
+impl<const N: usize, P: Pool<N>> From<P> for Buffer<'_, N, P> {
+	fn from(value: P) -> Self {
+		Self::new(value, BufferOptions::default())
+	}
+}
+
+impl<const N: usize, P: Pool<N>> Debug for Buffer<'_, N, P> {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		f.debug_struct("Buffer")
-			.field("segments", &self.segments)
+			.field("data", &self.data)
+			.field("share_threshold", &self.share_threshold)
+			.field("borrow_threshold", &self.borrow_threshold)
+			.field("allocation", &self.allocation)
 			.finish_non_exhaustive()
 	}
 }
 
-impl Buffer {
+impl<'d> Buffer<'d> {
 	/// Creates a new "lean" buffer. See [`BufferOptions::lean`] for details.
-	pub fn lean() -> Self {
-		Self::new_options(DefaultPool::get(), BufferOptions::lean())
-	}
+	pub fn lean() -> Self { BufferOptions::lean().into() }
 	
-	/// Creates a new buffer with `value`. Shorthand for:
+	/// Creates a new buffer with `value` in big-endian order. Shorthand for:
 	///
 	/// ```no_run
 	/// use orio::Buffer;
 	/// use orio::streams::BufSink;
 	///
 	/// let mut buf = Buffer::default();
-	/// buf.write_from(value)?;
+	/// buf.write_int(value)?;
 	/// ```
-	pub fn from_encode(value: impl Encode) -> Result<Self> {
+	pub fn from_int<T: num_traits::PrimInt + bytemuck::Pod>(value: T) -> Result<Self> {
 		let mut buf = Self::default();
-		buf.write_from(value)?;
+		buf.write_int(value)?;
 		Ok(buf)
 	}
 	
@@ -147,15 +92,31 @@ impl Buffer {
 	/// use orio::streams::BufSink;
 	///
 	/// let mut buf = Buffer::default();
-	/// buf.write_from_le(value)?;
+	/// buf.write_pod(value.to_le())?;
 	/// ```
-	pub fn from_encode_le(value: impl Encode) -> Result<Self> {
+	pub fn from_int_le<T: num_traits::PrimInt + bytemuck::Pod>(value: T) -> Result<Self> {
 		let mut buf = Self::default();
-		buf.write_from_le(value)?;
+		buf.write_int_le(value)?;
 		Ok(buf)
 	}
 
-	/// Creates a new buffer containing `value` as UTF-8-encoded bytes. Shorthand
+	/// Creates a new buffer from a UTF-8 string without copying its contents.
+	/// Shorthand for:
+	///
+	/// ```no_run
+	/// use orio::Buffer;
+	/// use orio::streams::BufSink;
+	///
+	/// let mut buf = Buffer::default();
+	/// buf.push_utf8(value)?;
+	/// ```
+	pub fn from_utf8<T: AsRef<str> + ?Sized>(value: &'d T) -> Self {
+		let mut buf = Self::default();
+		buf.push_utf8(value.as_ref());
+		buf
+	}
+
+	/// Creates a new buffer from a slice without copying its contents. Shorthand
 	/// for:
 	///
 	/// ```no_run
@@ -163,373 +124,349 @@ impl Buffer {
 	/// use orio::streams::BufSink;
 	///
 	/// let mut buf = Buffer::default();
-	/// buf.write_utf8(value)?;
+	/// buf.push_slice(value)?;
 	/// ```
-	pub fn from_utf8<T: AsRef<str>>(value: T) -> Result<Self> {
-		let mut buf = Buffer::default();
-		buf.write_utf8(value.as_ref())?;
-		Ok(buf)
+	pub fn from_slice<T: AsRef<[u8]> + ?Sized>(value: &'d T) -> Self {
+		let mut buf = Self::default();
+		buf.push_slice(value.as_ref());
+		buf
 	}
 
-	/// Creates a new buffer with `value`. Shorthand for:
-	///
-	/// ```no_run
-	/// use orio::Buffer;
-	/// use orio::streams::BufSink;
-	///
-	/// let mut buf = Buffer::default();
-	/// buf.write_from_slice(value)?;
-	/// ```
-	pub fn from_slice<T: AsRef<[u8]>>(value: T) -> Result<Self> {
-		let mut buf = Buffer::default();
-		buf.write_from_slice(value.as_ref())?;
-		Ok(buf)
+	/// Creates a new buffer from a [byte string](ByteStr) without copying its
+	/// contents.
+	pub fn from_byte_str(value: ByteStr<'d>) -> Self {
+		let mut buf = Self::default();
+		buf.data = value.iter()
+						.map(Seg::from_slice)
+						.collect::<Vec<_>>()
+						.into();
+		buf
 	}
 }
 
-impl<P: SharedPool> Buffer<P> {
-	pub fn new(pool: P) -> Self {
-		Self::new_options(pool, BufferOptions::default())
-	}
+impl<'d> FromIterator<u8> for Buffer<'d> {
+	fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
+		let iter = iter.into_iter();
+		let capacity = match iter.size_hint() {
+			(_, Some(upper)) => upper,
+			(lower, None) => lower
+		};
+		let mut data = Vec::<Seg>::with_capacity(capacity);
+		let pool = pool();
 
-	pub fn new_options(pool: P, options: BufferOptions) -> Self {
+		fn is_full(data: &Vec<Seg>) -> bool {
+			match data.last() {
+				Some(seg) => seg.is_full(),
+				None => true
+			}
+		}
+
+		for byte in iter {
+			if is_full(&data) {
+				data.push(pool.claim_one().unwrap_or_default());
+			}
+
+			let seg = data.last_mut().expect("a segment should have been claimed");
+			seg.push(byte).expect("claimed or created segment should be writable");
+		}
+
+		Self::new_buf(pool, data, BufferOptions::default())
+	}
+}
+
+impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
+	/// Creates a new buffer.
+	pub const fn new(
+		pool: P,
+		BufferOptions {
+			share_threshold,
+			borrow_threshold,
+			allocation,
+		}: BufferOptions
+	) -> Self {
 		Self {
+			data: RBuf::new(),
 			pool,
-			segments: SegRing::default(),
-			options,
+			share_threshold,
+			borrow_threshold,
+			allocation,
 		}
 	}
 
-	pub fn count(&self) -> usize {
-		self.segments.count()
+	/// Creates a new buffer with `data` as its internal ring buffer.
+	fn new_buf(
+		pool: P,
+		data: impl Into<RBuf<Seg<'d, N>>>,
+		BufferOptions {
+			share_threshold,
+			borrow_threshold,
+			allocation,
+		}: BufferOptions
+	) -> Self {
+		Self {
+			pool,
+			data: data.into(),
+			share_threshold,
+			borrow_threshold,
+			allocation,
+		}
 	}
 
-	pub fn is_empty(&self) -> bool { self.segments.is_empty() }
-
-	pub fn is_not_empty(&self) -> bool { self.segments.is_not_empty() }
-
-	fn lock_pool(pool: &P) -> Result<impl DerefMut<Target = impl Pool> + '_> {
-		Ok(pool.lock()?)
+	/// Returns the options used to create the buffer.
+	pub fn options(&self) -> BufferOptions {
+		BufferOptions {
+			share_threshold: self.share_threshold,
+			borrow_threshold: self.borrow_threshold,
+			allocation: self.allocation,
+		}
 	}
 
+	/// Returns the number of bytes that can be written to the buffer.
+	pub fn limit(&self) -> usize { self.data.limit() }
+	/// Returns the number of bytes in the buffer.
+	pub fn count(&self) -> usize { self.data.count() }
+	/// Returns `true` if the buffer is empty.
+	pub fn is_empty(&self) -> bool { self.data.is_empty() }
+	/// Returns `true` if the buffer is not empty.
+	pub fn is_not_empty(&self) -> bool { !self.data.is_empty() }
+
+	/// Consumes the buffer, creating a new one with identical contents, but with
+	/// borrowed data written to owned segments. The new buffer is "detached" from
+	/// the original buffer's lifetime, allowing it to outlive previously borrowed
+	/// data. This is useful when creating a buffer from a slice (i.e. [`from_utf8`]
+	/// or [`from_slice`]), where the borrowed data falls out of scope.
+	///
+	/// For example, this doesn't compile:
+	/// ```no_run
+	/// fn buf<'a, 'b>(data: &'b str) -> orio::Buffer<'a> {
+	/// 	orio::Buffer::from_utf8(data) // lifetime may not live long enough
+	/// }
+	/// ```
+	///
+	/// To make the above compile, the buffer lifetime must be detached from the slice
+	/// lifetime, by writing its data into owned segments:
+	/// ```no_run
+	/// use orio::streams::{BufSink, Result};
+	/// fn buf<'a, 'b>(data: &'b str) -> Result<orio::Buffer<'a>> {
+	/// 	let mut buf = orio::Buffer::default();
+	/// 	buf.write_utf8(data)?;
+	/// 	Ok(buf)
+	/// }
+	/// ```
+	///
+	/// Or, using `detached`:
+	/// ```no_run
+	/// fn buf<'a, 'b>(data: &'b str) -> orio::Buffer<'a> {
+	/// 	orio::Buffer::from_utf8(data).detached()
+	/// }
+	/// ```
+	///
+	/// [`from_utf8`]: Buffer::from_utf8
+	/// [`from_slice`]: Buffer::from_slice
+	pub fn detached<'de>(mut self) -> Buffer<'de, N, P> {
+		let data = {
+			let Self { data, pool, .. } = &mut self;
+			data.split_slice_segments();
+			data.drain(data.len())
+				.map(|seg| seg.detach(pool))
+				.collect_vec()
+		};
+		Buffer::new_buf(self.pool.clone(), data, self.options())
+	}
+
+	/// Clears data from the buffer.
 	pub fn clear(&mut self) -> Result {
-		let Self { pool, segments, .. } = self;
-		segments.clear(
-			pool.lock()
-				.context(BufClear)?
-				.deref_mut()
-		);
-		Ok(())
+		for seg in self.data.iter_mut() {
+			seg.clear();
+		}
+		// Take the internal ring buffer instead of draining. This should be
+		// significantly faster.
+		let segments = self.take_buf().buf;
+		self.pool
+			.collect(segments)
+			.context(Clear)
 	}
 
-	/// Copies `byte_count` bytes into `sink`. Memory is either actually copied or
+	/// Reserves at least `count` bytes of additional memory in the buffer.
+	pub fn reserve(&mut self, mut count: usize) -> Result {
+		let Self { data, pool, allocation, .. } = self;
+
+		let limit = data.limit();
+		if count <= limit {
+			return Ok(())
+		}
+
+		count -= limit;
+		let seg_count = count.div_ceil(N);
+		match allocation {
+			Allocate::Always => {
+				data.allocate(seg_count);
+				Ok(())
+			}
+			Allocate::OnError => {
+				if let Err(_) = pool.claim_size(data, count) {
+					data.allocate(seg_count);
+				}
+				Ok(())
+			}
+			Allocate::Never => pool.claim_size(data, count).context(Reserve)
+		}
+	}
+
+	/// Returns empty segments to the pool after reading.
+	fn resize(&mut self) -> Result {
+		let Self { pool, data, .. } = self;
+		pool.collect(data.drain_all_empty())
+			.context(Resize)
+	}
+
+	/// Copies `count` bytes into `sink`. Memory is either actually copied or
 	/// shared for performance; the tradeoff between wasted space by sharing small
 	/// segments and large, expensive mem-copies is managed by the implementation.
-	pub fn copy_to(&self, sink: &mut Buffer<impl SharedPool>, mut byte_count: usize) -> Result {
-		if byte_count == 0 { return Ok(()) }
-
-		let Buffer { pool, segments: dst, .. } = sink;
-		let share_threshold = sink.options.share_threshold;
+	pub fn copy_to(&self, sink: &mut Buffer<'d, N, impl Pool<N>>, mut count: usize) -> Result {
+		if count == 0 { return Ok(()) }
+		let share_threshold = sink.share_threshold;
 
 		let result: Result = try {
-			for seg in self.segments.iter() {
-				if byte_count == 0 { break }
+			for seg in self.data.iter() {
+				if count == 0 { break }
 
-				let size = min(seg.len(), byte_count);
+				let size = min(seg.len(), count);
+				let mut shared = seg.share(..size);
 				if size > share_threshold {
-					dst.push_back(seg.share(size));
-					byte_count -= size;
+					sink.data.push_back(shared);
+					count -= size;
 				} else {
-					dst.reserve(size, pool.lock()?.deref_mut());
+					sink.reserve(size)?;
 
-					let mut off = 0;
-					while let Some(mut target) = if off < size {
-						dst.pop_back()
-					} else {
-						None
-					} {
-						off += seg.copy_all_into(&mut target, off);
-						dst.push_back(target);
+					while let Some(mut dst) = shared.is_not_empty().then(||
+						sink.data
+							.pop_back()
+							.expect("sufficient space should have been reserved")
+					) {
+						dst.write_from(&mut shared);
+						sink.data.push_back(dst);
 					}
 				}
 			}
-
-			sink.tidy()?;
 		};
-		result.context(BufCopy)
+		result.set_context(Copy)
 	}
 
-	/// Copies all byte into `sink`. Memory is either actually copied or shared for
+	/// Copies all bytes into `sink`. Memory is either actually copied or shared for
 	/// performance; the tradeoff between wasted space by sharing small segments and
 	/// large, expensive mem-copies is managed by the implementation.
 	#[inline]
-	pub fn copy_all_to(&self, sink: &mut Buffer<impl SharedPool>) -> Result {
-		self.copy_to(sink, usize::MAX)
+	pub fn copy_all_to(&self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> Result {
+		self.copy_to(sink, self.count())
 	}
 
-	fn tidy(&mut self) -> Result {
-		if self.segments.frag() >= self.options.compact_threshold {
-			self.compact()?;
+	/// Skips up to `count` bytes.
+	pub fn skip(&mut self, count: usize) -> Result<usize> {
+		if count >= self.count() {
+			self.clear().set_context(Read)?;
+			return Ok(count)
 		}
 
-		self.resize()
-	}
-
-	/// Resizes according to the retention ratio.
-	fn resize(&mut self) -> Result {
-		let Self {
-			options: BufferOptions {
-				retention_ratio,
-				..
-			},
-			..
-		} = *self;
-		let Self { pool, segments, .. } = self;
-		let mut pool = pool.lock()?;
-
-		let count = segments.len() * retention_ratio;
-		let limit = segments.limit();
-
-		if count < limit {
-			let surplus = (limit - count) / SEGMENT_SIZE;
-			segments.trim(surplus, pool.deref_mut());
-		} else {
-			let deficit = count - limit;
-			pool.deref_mut().claim_size(segments, deficit);
-		}
-
-		Ok(())
-	}
-
-	/// Frees space by compacting data into partially filled segments. Called
-	/// automatically on write via the [`compact_threshold`][]. If an error occurs
-	/// in the pool, segments are reinserted before returning to ensure no data is
-	/// lost.
-	///
-	/// [`compact_threshold`]: BufferOptions::compact_threshold
-	pub fn compact(&mut self) -> Result {
-		fn merge(
-			a: &mut Segment,
-			b: &mut Segment,
-			pool: &mut impl Pool,
-			avoid_forks: bool,
-		) {
-			let is_a_shared = a.is_shared();
-			let is_b_shared = b.is_shared();
-
-			if a.off() == 0 && a.is_full() {
-				if !avoid_forks || is_b_shared {
-					b.shift();
-				}
+		let mut seg_count = 0;
+		let mut skipped = 0;
+		for (i, seg) in self.data.iter_mut().enumerate() {
+			let remaining = count - skipped;
+			if remaining > 0 {
+				skipped += seg.consume(remaining);
 			} else {
-				if !avoid_forks || is_a_shared {
-					if (!avoid_forks || !is_b_shared) && SEGMENT_SIZE - b.len() >= a.len() {
-						b.prefix_with(a);
-						mem::swap(a, b);
-					} else {
-						let mut empty = pool.claim_one();
-						a.shift();
-						a.move_all_into(&mut empty, 0);
-						mem::swap(a, &mut empty);
-						pool.collect_one(empty);
-						b.move_all_into(a, 0);
-					}
-				} else {
-					a.shift();
-					b.move_all_into(a, 0);
-				}
+				seg_count = i;
+				break
 			}
 		}
-
-		let Self { pool, segments, options, .. } = self;
-		let BufferOptions { is_fork_reluctant, .. } = *options;
-
-		let result: Result = try {
-			let mut pool = pool.lock()?;
-
-			segments.trim(usize::MAX, pool.deref_mut());
-
-			*segments = (|| {
-				let mut target = SegRing::default();
-				let Some(mut prev) = segments.pop_front() else { return target };
-				while let Some(mut curr) = segments.pop_front() {
-					merge(&mut prev, &mut curr, pool.deref_mut(), is_fork_reluctant);
-
-					if prev.is_full() {
-						target.push_back(prev);
-						prev = curr;
-					} else if curr.is_empty() {
-						pool.collect_one(curr);
-					} else {
-						segments.push_front(curr);
-					}
-				}
-
-				if prev.is_empty() {
-					pool.collect_one(prev);
-					return target
-				}
-
-				if !is_fork_reluctant || !prev.is_shared() {
-					prev.shift();
-				} else if prev.off() > 0 && !prev.is_full() {
-					let mut base = pool.claim_one();
-					prev.move_all_into(&mut base, 0);
-					pool.collect_one(prev);
-					prev = base;
-				}
-
-				target.push_back(prev);
-				target
-			})();
-		};
-		result.context(BufCompact)
-	}
-
-	/// Skips up to `byte_count` bytes.
-	pub fn skip(&mut self, mut byte_count: usize) -> Result<usize> {
-		let count = self.segments.read(|data| {
-			let mut count = 0;
-			for seg in data {
-				if byte_count == 0 { break }
-
-				let len = seg.len();
-				seg.consume(byte_count);
-				let skip_count = len - seg.len();
-				byte_count -= skip_count;
-				count += skip_count;
-			}
-			count
-		});
-
-		self.tidy().context(BufRead)?;
-
+		self.data.consume(skipped);
+		self.pool
+			.collect(self.data.drain(seg_count))
+			.context(Read)?;
 		Ok(count)
 	}
-	
-	/// Skips all remaining bytes. Unlike [`clear`][], free space will be retained
-	/// according to the [`retention_ratio`][].
-	/// 
-	/// [`clear`]: Self::clear
-	/// [`retention_ratio`]: BufferOptions::retention_ratio
-	pub fn skip_all(&mut self) -> Result<usize> {
-		self.skip(self.count())
+
+	/// Finds `pattern` within `range` in the buffer, returning the matching byte
+	/// range if found.
+	pub fn find(&self, pattern: impl Pattern) -> Option<Range<usize>> {
+		pattern.find_in(self.data.iter_slices())
 	}
 
-	/// Returns the index of a `char` in the buffer, or `None` if not found.
-	pub fn find_utf8_char(&self, char: char) -> Option<usize> {
-		self.find_utf8_char_in(char, ..)
-	}
-
-	/// Returns the index of a `char` in the buffer within `range`, or `None` if
-	/// not found. If invalid UTF-8 is encountered before a match is found, returns
-	/// `None`.
-	///
-	/// # Panics
-	///
-	/// Panics if the end point of `range` is greater than [`count`][].
-	///
-	/// [`count`]: Self::count
-	pub fn find_utf8_char_in<R: RangeBounds<usize>>(
-		&self,
-		char: char,
-		range: R
-	) -> Option<usize> {
+	/// Finds `pattern` within `range` in the buffer, returning the matching byte
+	/// range if found.
+	pub fn find_in_range<R: RangeBounds<usize>>(&self, pattern: impl Pattern, range: R) -> Option<Range<usize>> {
 		let range = slice::range(range, ..self.count());
-		let mut start = range.start;
-		let mut count = range.len();
-		let mut offset = 0;
-
-		for seg in self.segments.iter() {
-			if count == 0 { break }
-
-			// Seek
-			if start >= seg.len() {
-				start -= seg.len();
-				offset += seg.len();
-				continue
-			} else {
-				offset += start;
-				start = 0;
-			}
-
-			let end = min(count, seg.len());
-
-			let mut invalid = false;
-			let str = {
-				let mut data = seg.data(start..end);
-				match from_utf8(data) {
-					Ok(str) => str,
-					Err(err) => {
-						invalid = true;
-						let end = err.valid_up_to();
-						data = &data[..end];
-						expect!(
-							from_utf8(data),
-							"data should be valid UTF-8 up to {end}"
-						)
-					}
-				}
-			};
-
-			if let Some(hit) = str.find(char) {
-				return Some(offset + hit)
-			}
-
-			if invalid { break }
-
-			offset += seg.len();
-			count = count.saturating_sub(seg.len());
-		}
-
-		None
+		pattern.find_in(self.data.iter_slices_in_range(range))
 	}
 
 	/// Returns the byte at position `pos`, or `None` if `pos` is out of bounds.
 	pub fn get(&self, mut pos: usize) -> Option<u8> {
 		if pos > self.count() { return None }
 
-		for seg in self.segments.iter() {
+		for seg in self.data.iter() {
 			if seg.len() < pos {
 				pos -= seg.len();
 			} else {
-				return Some(seg.data(..)[pos])
+				return Some(seg[pos])
 			}
 		}
 
 		None
 	}
 
-	/// Borrows the contents of the buffer as a [`ByteStr`].
+	/// Borrows the contents of the buffer as a [byte string](ByteStr).
 	pub fn as_byte_str(&self) -> ByteStr {
-		let ref segments = self.segments;
-		segments.into()
-	}
-
-	/// Clears and closed the buffer.
-	pub fn close(&mut self) -> Result { self.clear() }
-
-	/// Inserts the contents of `other` at the start of this buffer. Used for seeking.
-	pub(crate) fn prefix_with(&mut self, other: &mut Buffer<impl SharedPool>) -> Result {
-		// Todo: shouldn't these segments go at the front of self?
-		while let Some(seg) = other.segments.pop_front() {
-			self.segments.push_back(seg)
-		}
-		
-		let tidy_self = self.tidy();
-		let tidy_other = other.tidy();
-		tidy_self?;
-		tidy_other
+		(&self.data).into()
 	}
 }
 
-impl<P: SharedPool> Drop for Buffer<P> {
+impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
+	pub(crate) fn full_segment_count(&self) -> usize {
+		let mut len = self.data.len();
+		if !self.data.back().is_some_and(Seg::is_full) {
+			len -= 1;
+		}
+
+		self.data.iter().take(len).map(Seg::len).sum()
+	}
+
+	/// Swaps internal buffers.
+	pub(crate) fn swap(&mut self, Buffer { data, .. }: &mut Buffer<'d, N, impl Pool<N>>) {
+		mem::swap(&mut self.data, data);
+	}
+
+	/// Takes the internal buffer, leaving a new one in its place.
+	pub(crate) fn take_buf(&mut self) -> RBuf<Seg<'d, N>> {
+		mem::take(&mut self.data)
+	}
+}
+
+impl<const N: usize, P: Pool<N>> Drop for Buffer<'_, N, P> {
 	fn drop(&mut self) {
 		let _ = self.close();
 	}
 }
 
-impl<P: SharedPool> Seekable for Buffer<P> {
+impl<const N: usize, P: Pool<N>> Stream<N> for Buffer<'_, N, P> {
+	/// Returns whether the buffer is closed; always returns `false`.
+	#[inline(always)]
+	fn is_closed(&self) -> bool { false }
+	/// Clears the buffer.
+	#[inline]
+	fn close(&mut self) -> StreamResult {
+		self.clear()?;
+		Ok(())
+	}
+}
+
+impl<'d, const N: usize, P: Pool<N>> BufStream<'d, N> for Buffer<'d, N, P> {
+	type Pool = P;
+
+	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, P> { self }
+	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, P> { self }
+}
+
+impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {
 	/// Seeks to an `offset` in the buffer by skipping, returning a new *effective
 	/// position*.
 	///
@@ -542,22 +479,44 @@ impl<P: SharedPool> Seekable for Buffer<P> {
 	/// one that would be returned for a stream at position `0` before seeking, is
 	/// returned. Seeking forward of by offset from start or end returns the number
 	/// of bytes skipped.
-	fn seek(&mut self, offset: SeekOffset) -> Result<usize> {
+	fn seek(&mut self, offset: SeekOffset) -> StreamResult<usize> {
 		self.skip(
 			offset.to_pos(0, self.count())
-		).context(StreamSeek)
+		).context(StreamContext::Seek)
 	}
 
 	/// Returns the [`count`][].
 	/// 
 	/// [`count`]: Buffer::count
-	fn seek_len(&mut self) -> Result<usize> { Ok(self.count()) }
+	fn seek_len(&mut self) -> StreamResult<usize> { Ok(self.count()) }
 
 	/// Returns `0`.
-	fn seek_pos(&mut self) -> Result<usize> { Ok(0) }
+	fn seek_pos(&mut self) -> StreamResult<usize> { Ok(0) }
 }
 
-impl<P: SharedPool> BufStream for Buffer<P> {
-	fn buf(&self) -> &Self { self }
-	fn buf_mut(&mut self) -> &mut Self { self }
+impl<const N: usize, Pa: Pool<N>, const O: usize, Pb: Pool<O>> PartialEq<Buffer<'_, O, Pb>> for Buffer<'_, N, Pa> {
+	fn eq(&self, other: &Buffer<'_, O, Pb>) -> bool {
+		self.data.iter().eq(other.data.iter())
+	}
+}
+
+impl<const N: usize, P: Pool<N>> PartialEq<[u8]> for Buffer<'_, N, P> {
+	fn eq(&self, mut other: &[u8]) -> bool {
+		if self.count() != other.len() {
+			return false
+		}
+
+		self.data.iter().all(move |seg| {
+			assert_ge!(other.len(), seg.len());
+			let cur = &other[..seg.len()];
+			other = &other[seg.len()..];
+			seg == cur
+		})
+	}
+}
+
+impl<const N: usize, P: Pool<N>, T: AsRef<[u8]>> PartialEq<T> for Buffer<'_, N, P> {
+	fn eq(&self, other: &T) -> bool {
+		self == other.as_ref()
+	}
 }

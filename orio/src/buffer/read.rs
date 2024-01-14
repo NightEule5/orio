@@ -1,234 +1,212 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cmp::min;
-use std::io::Write;
-use simdutf8::compat::from_utf8;
-use crate::{Buffer, ByteString, Context::BufRead, Error, Result, ResultExt};
-use crate::streams::{BufSource, OffsetUtf8Error, Sink, Source};
-use crate::pool::SharedPool;
+use std::io;
+use std::io::{ErrorKind, IoSlice, Write};
+use crate::{Buffer, StreamResult as Result, BufferResult, StreamResult, ResultSetContext, ResultContext};
+use crate::BufferContext::{Drain, Fill};
+use crate::pattern::{LineTerminator, Pattern};
+use crate::pool::Pool;
+use crate::segment::SliceRangeIter;
+use crate::streams::{BufSource, Source, Utf8Match};
+use crate::StreamContext::Read;
+use super::read_partial_utf8_into;
 
-impl<P: SharedPool> Buffer<P> {
-	fn read_segments(
-		&mut self,
-		mut max_count: usize,
-		mut consume: impl FnMut(&[u8]) -> Result<usize>,
-	) -> Result<usize> {
-		let mut count = 0;
-		self.segments.read(|data| {
-			for seg in data {
-				if max_count == 0 { break }
-				let len = min(max_count, seg.len());
-				let read = consume(seg.data(..len))?;
-				count += read;
-				max_count -= count;
-				seg.consume(read);
+impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
+	fn is_eos(&self) -> bool {
+		self.is_empty()
+	}
+
+	fn fill(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>, count: usize) -> BufferResult<usize> {
+		if count == 0 { return Ok(0) }
+
+		// Use faster fill_all.
+		if count >= self.count() {
+			return self.fill_all(sink)
+		}
+
+		let mut remaining = count;
+		let partial_pos = self.data.iter().position(|seg|
+			if seg.len() > remaining && remaining > sink.share_threshold {
+				true
+			} else {
+				remaining -= seg.len();
+				false
 			}
-			Ok::<_, Error>(())
-		})?;
+		).unwrap();
 
-		self.tidy().context(BufRead)?;
+		sink.reserve(remaining).set_context(Fill)?;
+
+		sink.data.extend(
+			self.data
+				.drain(partial_pos)
+		);
+
+		if let Some(mut seg) = self.data.pop_front() {
+			let mut shared = seg.share(..remaining);
+			// Share partial segment with sink
+			let partial = if remaining >= sink.share_threshold {
+				shared
+			} else {
+				let mut fresh = sink.data.pop_back().expect(
+					"buffer should have writable segments after reserve"
+				);
+				fresh.write_from(&mut shared)
+					 .expect("back segment should be writable");
+				fresh
+			};
+
+			seg.consume(remaining);
+			self.data.push_front(seg);
+			sink.data.push_back(partial);
+		}
+
+		self.resize().set_context(Fill)?;
 		Ok(count)
 	}
 
-	pub(crate) fn read_std<W: Write>(&mut self, writer: &mut W, count: usize) -> Result<usize> {
-		self.read_segments(count, |seg| Ok(writer.write(seg)?))
+	fn fill_all(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
+		self.resize().set_context(Fill)?;
+		let read = self.count();
+		// Take the internal ring buffer instead of draining, which should be
+		// significantly faster; similar to Buffer::clear.
+		sink.data.extend(self.take_buf());
+		Ok(read)
 	}
 }
 
-impl<P: SharedPool> Source for Buffer<P> {
-	fn read(
-		&mut self,
-		sink: &mut Buffer<impl SharedPool>,
-		mut count: usize
-	) -> Result<usize> {
-		let mut read = 0;
-		count = count.clamp(0, self.count());
+impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
+	fn request(&mut self, count: usize) -> StreamResult<bool> {
+		Ok(self.count() >= count)
+	}
 
-		let Self { segments, .. } = self;
-		while count > 0 {
-			let Some(seg) = segments.pop_front() else { break };
-			let len = seg.len();
-
-			if seg.len() <= count {
-				// Move full segments to the sink.
-				sink.segments.push_back(seg);
-			} else {
-				// Share the last partial segment.
-				sink.segments.push_back(seg.share(count));
-				segments.push_front(seg);
+	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
+		let mut count = 0;
+		let mut empty_len = 0;
+		for seg in self.data.iter_mut() {
+			if buf.len() - count == 0 {
+				break
 			}
 
-			count -= len;
-			read += len;
+			count += seg.read(&mut buf[count..]);
+			if seg.is_empty() {
+				empty_len += 1;
+			} else {
+				break
+			}
 		}
+		self.data.consume(count);
+		self.data.rotate_back(empty_len);
+		Ok(count)
+	}
 
-		let result: Result = try {
-			let self_tidy = self.tidy();
-			let sink_tidy = sink.tidy();
-			self_tidy?;
-			sink_tidy?;
-		};
-		result.context(BufRead)?;
+	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
+		self.require(buf.len())?;
+		let count = self.read_slice(buf)?;
+		assert_eq!(count, buf.len(), "require should ensure all bytes are available");
+		Ok(count)
+	}
 
-		Ok(read)
+	fn read_utf8(&mut self, buf: &mut String, mut count: usize) -> Result<usize> {
+		count = count.min(self.count());
+		buf.reserve(count);
+		let read = read_partial_utf8_into(
+			self.data.iter_slices_in_range(..count),
+			buf
+		).context(Read)?;
+		self.skip(read)
+			.context(Read)
 	}
 
 	#[inline]
-	fn read_all(&mut self, sink: &mut Buffer<impl SharedPool>) -> Result<usize> {
-		self.read(sink, self.count())
+	fn read_utf8_to_end(&mut self, buf: &mut String) -> Result<usize> {
+		self.read_utf8(buf, self.count())
 	}
 
-	fn close_source(&mut self) -> Result { self.close() }
-}
-
-macro_rules! gen_int_reads {
-    ($($s_name:ident$s_le_name:ident$s_ty:ident$u_name:ident$u_le_name:ident$u_ty:ident),+) => {
-		$(
-		fn $s_name(&mut self) -> Result<$s_ty> {
-			self.$u_name().map(|n| n as $s_ty)
-		}
-
-		fn $s_le_name(&mut self) -> Result<$s_ty> {
-			self.$u_le_name().map(|n| n as $s_ty)
-		}
-
-		fn $u_name(&mut self) -> Result<$u_ty> {
-			Ok($u_ty::from_be_bytes(self.read_array()?))
-		}
-
-		fn $u_le_name(&mut self) -> Result<$u_ty> {
-			Ok($u_ty::from_le_bytes(self.read_array()?))
-		}
-		)+
-	};
-}
-
-impl<P: SharedPool> BufSource for Buffer<P> {
-	fn request(&mut self, byte_count: usize) -> Result<bool> {
-		Ok(self.count() >= byte_count)
+	#[inline]
+	fn read_utf8_line(&mut self, buf: &mut String) -> Result<Utf8Match> {
+		self.read_utf8_until(buf, LineTerminator)
 	}
 
-	fn read_all(&mut self, sink: &mut impl Sink) -> Result<usize> {
-		sink.write_all(self)
-			.context(BufRead)
+	#[inline]
+	fn read_utf8_line_inclusive(&mut self, buf: &mut String) -> Result<Utf8Match> {
+		self.read_utf8_until_inclusive(buf, LineTerminator)
 	}
 
-	fn read_i8(&mut self) -> Result<i8> {
-		self.read_u8().map(|n| n as i8)
-	}
-
-	fn read_u8(&mut self) -> Result<u8> {
-		self.require(1)?;
-
-		let byte = self.segments.read(|segments| {
-			let seg = segments.first_mut().expect(
-				"should be at least one segment after require operation"
-			);
-
-			seg.pop().expect(
-				"should be at least one byte available after require operation"
-			)
-		});
-
-		self.tidy().context(BufRead)?;
-		Ok(byte)
-	}
-
-	gen_int_reads! {
-		read_i16   read_i16_le   i16   read_u16   read_u16_le u16,
-		read_i32   read_i32_le   i32   read_u32   read_u32_le u32,
-		read_i64   read_i64_le   i64   read_u64   read_u64_le u64,
-		read_isize read_isize_le isize read_usize read_usize_le usize
-	}
-
-	fn read_byte_str(&mut self, byte_count: usize) -> Result<ByteString> {
-		let len = min(byte_count, self.count());
-		let mut dst = ByteString::with_capacity(len);
-
-		self.read_segments(byte_count, |seg| {
-			dst.extend_from_slice(seg);
-			Ok(seg.len())
-		})?;
-		Ok(dst)
-	}
-
-	fn read_into_slice(&mut self, dst: &mut [u8]) -> Result<usize> {
-		let n = min(dst.len(), self.count());
-		self.read_into_slice_exact(&mut dst[..n])?;
-		Ok(n)
-	}
-
-	fn read_into_slice_exact(&mut self, dst: &mut [u8]) -> Result {
-		let count = dst.len();
-		self.require(count)?;
-
-		let mut off = 0;
-		self.read_segments(count, |seg| {
-			if off >= count { return Ok(0) }
-
-			let len = min(dst.len(), seg.len());
-			dst[off..off + len].copy_from_slice(&seg[..len]);
-			off += len;
-			Ok(len)
-		})?;
-
-		assert_eq!(off, dst.len(), "exact slice length should have been read");
-
-		Ok(())
-	}
-
-	fn read_utf8(&mut self, str: &mut String, byte_count: usize) -> Result<usize> {
-		let mut off = 0;
-		self.read_segments(byte_count, |seg| {
-			let utf8 = from_utf8(seg).map_err(|err|
-				Error::new(BufRead, OffsetUtf8Error::new(err, off).into())
-			)?;
-
-			off += seg.len();
-
-			str.push_str(utf8);
-
-			Ok(utf8.len())
-		})
-	}
-
-	fn read_utf8_line(&mut self, str: &mut String) -> Result<bool> {
-		if let Some(mut line_term) = self.find_utf8_char('\n') {
-			let mut len = 1;
-
-			// CRLF
-			if line_term > 0 {
-				if let Some(b'\r') = self.get(line_term - 1) {
-					line_term -= 1;
-					len += 1;
-				}
-			}
-
-			self.read_utf8(str, line_term)?;
-			self.skip(len)?;
-			Ok(true)
+	/// Reads UTF-8 bytes into `buf` until the `terminator` pattern, returning the
+	/// number of bytes read and whether the pattern was found. If a decode error
+	/// occurs, no data is consumed and `buf` will contain the last valid data.
+	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
+		if let Some(range) = self.find(terminator) {
+			let count = self.read_utf8(buf, range.start)?;
+			self.skip(range.len())?;
+			Ok((count, true).into())
 		} else {
-			// No line terminator found, read to end instead.
-			self.read_all_utf8(str)?;
-			Ok(false)
+			self.read_utf8_to_end(buf)
+				.map(|count| (count, false).into())
 		}
 	}
 
-	fn read_utf8_into_slice(&mut self, str: &mut str) -> Result<usize> {
-		let mut off = 0;
-		self.read_segments(str.len(), |seg| {
-			let utf8 = from_utf8(seg).map_err(|err|
-				Error::new(BufRead, OffsetUtf8Error::new(err, off).into())
-			)?;
+	/// Reads UTF-8 bytes into `buf` until and including the `terminator` pattern,
+	/// returning the number of bytes read and whether the pattern was found. If a
+	/// decode error occurs, no data is consumed and `buf` will contain the last
+	/// valid data.
+	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
+		if let Some(range) = self.find(terminator) {
+			self.read_utf8(buf, range.end)
+				.map(|count| (count, true).into())
+		} else {
+			self.read_utf8_to_end(buf)
+				.map(|count| (count, false).into())
+		}
+	}
+}
 
-			off += seg.len();
+impl<'a: 'b, 'b, const N: usize> SliceRangeIter<'a, 'b, N> {
+	fn collect_io_slices(self) -> Vec<IoSlice<'b>> {
+		let mut vec: Vec<_> = self.map(IoSlice::new).collect();
+		vec.retain(|s| !s.is_empty());
+		vec
+	}
+}
 
-			let off = str.len() - seg.len();
-			unsafe {
-				str[off..].as_bytes_mut().copy_from_slice(utf8.as_bytes());
-			}
+impl<'a, const N: usize, P: Pool<N>> Buffer<'a, N, P> {
+	pub(crate) fn drain_into_writer(
+		&mut self,
+		writer: &mut impl Write,
+		mut count: usize,
+		allow_vectored: bool,
+	) -> BufferResult<usize> {
+		count = count.min(self.count());
+		if count == 0 {
+			return Ok(0)
+		}
 
-			Ok(utf8.len())
-		})
+		let slices = self.data.iter_slices_in_range(..count);
+		let result = if allow_vectored && writer.is_write_vectored() {
+			count = writer.write_vectored(&slices.collect_io_slices()).context(Drain)?;
+			Ok(())
+		} else {
+			let mut written = 0;
+			let result: io::Result<()> = try {
+				'data: for mut data in slices.filter(|s| !s.is_empty()) {
+					while !data.is_empty() {
+						written += match writer.write(data) {
+							Ok(0) => break 'data,
+							Ok(written) => {
+								data = &data[written..];
+								written
+							}
+							Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+							error => error?
+						};
+					}
+				}
+			};
+			count = written;
+			result.context(Drain)
+		};
+		count = self.skip(count).set_context(Drain)?;
+		result?;
+		Ok(count)
 	}
 }

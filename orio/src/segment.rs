@@ -1,590 +1,447 @@
 // SPDX-License-Identifier: Apache-2.0
 
-mod memory;
+mod ring;
+mod block_deque;
+mod buffer;
+mod util;
 
-use std::collections::VecDeque;
+pub(crate) use ring::*;
+
 use std::cmp::min;
-use std::iter::Sum;
-use std::ops::RangeBounds;
-use std::slice;
-use itertools::Itertools;
+use std::ops::{Index, RangeBounds};
+use std::{mem, slice};
+use std::mem::MaybeUninit;
+use all_asserts::assert_gt;
+use block_deque::BlockDeque;
+pub(crate) use block_deque::{buf as alloc_block, Block};
+use buffer::Buf;
+use util::SliceExt;
 use crate::pool::Pool;
-use memory::Memory;
 
-pub const SIZE: usize = 8 * 1024;
+pub const SIZE: usize = 8192;
 
-// Todo: count fragmentation after reading as well as after writing.
-
-/// A ring buffer of [`Segment`]s. Written segments are placed in sequence at the
-/// front, empty segments at the back. While reading, segments are popped front to
-/// back until an empty segment or the end of the buffer. While writing, empty
-/// segments are popped from the back and written segments are inserted after the
-/// last written segment.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SegRing {
-	/// The backing ring buffer.
-	ring: VecDeque<Segment>,
-	/// The number of written segments.
-	len: usize,
-	/// The number of bytes that can be written before the buffer is full.
-	limit: usize,
-	/// The number of bytes in the buffer.
-	count: usize,
-	/// The degree of fragmentation, measuring the total free space locked between
-	/// partially written segments.
-	frag: usize,
-}
-
-impl SegRing {
-	/// Returns the number of segments written.
-	pub fn len(&self) -> usize { self.len }
-	/// Returns the number of bytes that can be written before claiming.
-	pub fn limit(&self) -> usize { self.limit }
-	/// Returns the number of bytes written.
-	pub fn count(&self) -> usize { self.count }
-	/// Returns the degree of fragmentation.
-	pub fn frag(&self) -> usize { self.frag }
-
-	/// Returns `true` if no data is written.
-	pub fn is_empty(&self) -> bool { self.count == 0 }
-	/// Returns `true` if data is written.
-	pub fn is_not_empty(&self) -> bool { self.count > 0 }
-	/// Returns `true` if the deque contains empty segments.
-	fn has_empty(&self) -> bool { self.len < self.ring.len() }
-	/// Returns a count of empty segments in the deque.
-	fn empty_count(&self) -> usize { self.ring.len() - self.len }
-
-	/// Returns the last non-empty segment, if any.
-	pub fn last(&self) -> Option<&Segment> {
-		if self.is_empty() {
-			None
-		} else {
-			Some(&self.ring[self.len - 1])
-		}
-	}
-
-	/// Pushes a partially read segment to the front of the deque.
-	pub fn push_front(&mut self, seg: Segment) {
-		if seg.is_empty() {
-			self.push_empty(seg);
-			return
-		}
-
-		self.len += 1;
-		self.count += seg.len();
-
-		if self.is_empty() {
-			self.limit += seg.limit();
-		} else {
-			self.frag += seg.limit();
-		}
-
-		self.ring.push_front(seg);
-	}
-
-	/// Pushes a written or empty segment to the back of the deque.
-	pub fn push_back(&mut self, seg: Segment) {
-		if seg.is_empty() {
-			self.push_empty(seg);
-		} else {
-			self.push_laden(seg);
-		}
-	}
-
-	fn push_empty(&mut self, seg: Segment) {
-		self.limit += SIZE;
-		self.ring.push_back(seg);
-	}
-
-	fn push_laden(&mut self, seg: Segment) {
-		let last_lim = self.last().map(Segment::limit).unwrap_or_default();
-		self.limit -= last_lim;
-		self.frag += last_lim;
-		self.limit += seg.limit();
-		self.count += seg.len();
-		self.ring.insert(self.len, seg);
-		self.len += 1;
-	}
-
-	/// Pops the front segment from the deque for reading.
-	pub fn pop_front(&mut self) -> Option<Segment> {
-		if self.is_empty() { return None }
-
-		let seg = self.ring.pop_front()?;
-
-		if self.is_empty() {
-			self.limit -= seg.limit();
-		} else {
-			self.frag -= seg.limit();
-		}
-
-		self.len -= 1;
-		self.count -= seg.len();
-		Some(seg)
-	}
-
-	/// Pops the back-most unfilled segment from the deque for writing.
-	pub fn pop_back(&mut self) -> Option<Segment> {
-		let seg = if self.has_empty() {
-			// Faster to replace the popped segment with a fresh one from the back
-			// if possible.
-			self.ring.swap_remove_back(self.len)?
-		} else {
-			self.ring.pop_back()?
-		};
-
-		self.len += 1;
-		self.limit -= seg.limit();
-		self.count -= seg.len();
-		Some(seg)
-	}
-
-	/// Reads segments from the front of the deque, rotating empty segments to the
-	/// back.
-	pub fn read<T>(
-		&mut self,
-		read: impl FnOnce(&mut [Segment]) -> T
-	) -> T {
-		if self.is_empty() {
-			return read(&mut [])
-		}
-
-		#[derive(Debug, Default)]
-		struct Snapshot {
-			count: usize,
-			limit: usize
-		}
-
-		impl Sum for Snapshot {
-			fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-				iter.reduce(|mut sum, Snapshot { count, limit }| {
-					sum.count += count;
-					sum.limit += limit;
-					sum
-				}).unwrap_or_default()
-			}
-		}
-
-		impl Snapshot {
-			fn take(segments: &[Segment]) -> Vec<Snapshot> {
-				segments.iter()
-						.map(|seg|
-							Self {
-								count: seg.len(),
-								limit: seg.limit()
-							}
-						)
-						.collect()
-			}
-		}
-
-		let (mut front, _) = self.ring.as_mut_slices();
-		front = &mut front[..self.len];
-
-		let mut snap = Snapshot::take(front);
-		let result = read(front);
-
-		let n = front.iter()
-					 .take_while(|seg| Segment::is_empty(seg))
-					 .count();
-
-		// If all segments were read, remove the last segment's limit from the
-		// total and its "snapshot".
-		if self.len > 0 && n == self.len {
-			let ref mut last = snap[n - 1];
-			self.limit -= last.limit;
-			last.limit = 0;
-		}
-
-		let Snapshot { count, limit } = snap.into_iter().take(n).sum();
-		self.count -= count;
-		self.frag -= limit;
-		self.consume_front(n);
-
-		result
-	}
-
-	fn consume_front(&mut self, count: usize) {
-		self.len -= count;
-		self.limit += count * SIZE;
-		self.ring.rotate_left(count);
-	}
-
-	/// Writes to segments from the back of the deque, rotating full segments to
-	/// the front.
-	pub fn write<T>(
-		&mut self,
-		write: impl FnOnce(&mut [Segment]) -> T
-	) -> T {
-		let mut empty_count = self.empty_count();
-		let count = {
-			let mut len = 0;
-			if let Some(last) = self.last() {
-				if !last.is_full() {
-					empty_count += 1;
-					len = last.len();
-				}
-			}
-			len
-		};
-		self.limit += count;
-		self.count -= count;
-
-		self.ring.rotate_right(empty_count);
-		self.limit -= empty_count * SIZE;
-
-		let (mut front, _) = self.ring.as_mut_slices();
-		front = &mut front[..empty_count];
-		let result = write(front);
-
-		let len = front.iter()
-					   .position(|seg| seg.is_empty())
-					   .unwrap_or(front.len());
-		self.len = len;
-		for (i, seg) in front[..len].iter().enumerate() {
-			if i < len.saturating_sub(1) {
-				self.frag += seg.limit();
-			}
-			self.count += seg.len();
-		}
-
-		self.limit += if len == 0 { 0 } else { front[len - 1].limit() };
-		self.limit += (front.len() - len) * SIZE;
-
-		let rot = front.len();
-		self.ring.rotate_left(rot);
-
-		result
-	}
-
-	/// Reserves at least `count` bytes of segments, increasing [`Self::limit`] to
-	/// `[n,n+N)`.
-	pub fn reserve(&mut self, count: usize, pool: &mut impl Pool) {
-		pool.claim_size(self, count.saturating_sub(self.limit))
-	}
-	
-	/// Clears and collects all segments into `pool`.
-	pub fn clear(&mut self, pool: &mut impl Pool) {
-		pool.collect(
-			self.ring
-				.drain(..)
-				.update(Segment::clear)
-		)
-	}
-
-	/// Collects up to `count` empty segments into `pool`.
-	pub fn trim(&mut self, mut count: usize, pool: &mut impl Pool) {
-		count = min(count, self.empty_count());
-		if count == 0 { return }
-
-		self.limit = count * SIZE;
-		let len = self.len;
-		pool.collect(self.ring.drain(len..len + count));
-	}
-
-	/// Iterates over written segments.
-	pub fn iter(&self) -> impl Iterator<Item = &Segment> {
-		self.ring
-			.iter()
-			.take(self.len)
-	}
-
-	/// Iterates over written segments a slices.
-	pub fn slices(&self) -> impl Iterator<Item = &[u8]> {
-		self.iter()
-			.map(|s| s.data(..))
-	}
-}
-
-impl Extend<Segment> for SegRing {
-	fn extend<T: IntoIterator<Item = Segment>>(&mut self, iter: T) {
-		let Self { ring, limit, .. } = self;
-		let len = ring.len();
-
-		ring.extend(iter);
-
-		*limit += (ring.len() - len) * SIZE;
-	}
-
-	fn extend_reserve(&mut self, additional: usize) {
-		self.ring.reserve(additional)
-	}
-}
-
-#[cfg(test)]
-mod ring_test {
-	use std::error::Error;
-	use crate::pool::VoidPool;
-	use crate::segment::{SegRing, SIZE};
-
-	#[test]
-	fn write_read() -> Result<(), Box<dyn Error>> {
-		let ref mut pool = VoidPool::default();
-		let mut ring = SegRing::default();
-
-		ring.reserve(7 * SIZE, pool);
-		assert_eq!(ring.len, 0);
-		assert_eq!(ring.limit, 7 * SIZE);
-		assert_eq!(ring.count, 0);
-		assert_eq!(ring.frag, 0);
-
-		ring.write(|data| {
-			for seg in &mut data[..3] {
-				seg.grow(SIZE / 2);
-			}
-		});
-
-		assert_eq!(ring.len, 3, "length after write");
-		assert_eq!(ring.limit, 4 * SIZE + SIZE / 2, "limit after write");
-		assert_eq!(ring.count, 3 * SIZE / 2, "count after write");
-		assert_eq!(ring.frag, SIZE, "fragmentation after write");
-
-		ring.read(|data| {
-			for seg in &mut data[..3] {
-				seg.consume(SIZE / 2);
-			}
-		});
-
-		assert_eq!(ring.len, 0, "length after read");
-		assert_eq!(ring.limit, 7 * SIZE, "limit after read");
-		assert_eq!(ring.count, 0, "count after read");
-		assert_eq!(ring.frag, 0, "fragmentation after read");
-
-		Ok(())
-	}
-}
-
-/// A fixed-size size memory segment. Segment memory can be safely shared between
-/// buffers; modifying shared segments will cause them to *fork* their memory (they
-/// copy-on-write). Empty segments are reused by returning them to a global pool,
-/// called *collection*.
+/// A sharable, ring buffer-like memory segment containing borrowed or owned data:
+/// - An [`N`]-sized array (called a *block*)
+/// - A variable-size vector from a boxed slice, or
+/// - A borrowed slice
 ///
-/// Handling segments is not recommended. For a higher-level API, see [`Buffer`][1].
+/// Can be cheaply cloned in O(1) time to *share data* between segments, such that
+/// read operations avoid costly copies. Data can only be written if the segment is
+/// not sharing its data with another segment, otherwise it must be copied to a new
+/// buffer before writing.
 ///
-/// [1]: crate::Buffer
-#[derive(Clone, Debug, Default)]
-pub struct Segment {
-	mem: Memory<u8, SIZE>,
+/// Segments are designed to be reused to avoid allocating new memory. Segments can
+/// be claimed from the segment [pool](super::pool), and collected into it when
+/// finished. It's not recommended to let a segment drop instead of collecting it,
+/// unless you're sure it contains shared data.
+#[derive(Clone, Debug, Eq)]
+pub struct Seg<'d, const N: usize = SIZE>(Buf<'d, N>);
+
+impl<'d, const N: usize, T: Into<Buf<'d, N>>> From<T> for Seg<'d, N> {
+	fn from(value: T) -> Self { Self(value.into()) }
 }
 
-impl Segment {
-	fn new(mem: Memory<u8, SIZE>) -> Self {
-		Self { mem }
+impl<const N: usize> Default for Seg<'_, N> {
+	#[inline]
+	fn default() -> Self { Self::new_block() }
+}
+
+impl<'d, const N: usize> Seg<'d, N> {
+	/// Allocates a new block segment.
+	pub fn new_block() -> Self {
+		Self(Buf::Block(BlockDeque::new()))
 	}
 
+	/// Creates a segment containing `slice`.
+	pub const fn from_slice(slice: &'d [u8]) -> Self {
+		Self(Buf::Slice(slice))
+	}
+
+	/// Returns the number of bytes in the segment.
+	pub fn len(&self) -> usize { self.0.len() }
+	/// Returns the number of bytes that can be written to the segment.
+	pub fn limit(&self) -> usize { self.0.limit() }
+	/// Returns the space, in bytes, occupied by the segment. The result is:
+	/// - [`N`] for block segments,
+	/// - The deque capacity for boxed segments, or
+	/// - The length of slice segments
+	pub fn size(&self) -> usize {
+		match &self.0 {
+			Buf::Block(_) => N,
+			Buf::Boxed(boxed) => boxed.buf.capacity(),
+			Buf::Slice(slice) => slice.len(),
+		}
+	}
 	/// Returns `true` if the segment is empty.
-	pub fn is_empty(&self) -> bool { self.mem.is_empty() }
+	pub fn is_empty(&self) -> bool { self.len() == 0 }
+	/// Returns `true` if the segment is not empty.
+	pub fn is_not_empty(&self) -> bool { !self.is_empty() }
 	/// Returns `true` if the segment is full.
 	pub fn is_full(&self) -> bool { self.limit() == 0 }
-	/// Returns the memory offset.
-	pub(crate) fn off(&self) -> usize { self.mem.off() }
-	/// Returns the number of bytes written to the segment.
-	pub fn len(&self) -> usize { self.mem.cnt() }
-	/// Returns the number of bytes that can be written to the segment.
-	pub fn limit(&self) -> usize { self.mem.lim() }
-	/// Returns a slice of bytes written to the segment. [`consume`][] must be
-	/// called to complete a read operation.
+	/// Returns `true` if the segment contains shared data and cannot be written to.
+	/// Opposite of [`is_exclusive`].
 	///
-	/// [`consume`]: Self::consume
-	pub fn data<R: RangeBounds<usize>>(&self, range: R) -> &[u8] {
-		let range = slice::range(range, ..self.len());
-		&self.mem.data()[range]
+	/// [`is_exclusive`]: Self::is_exclusive
+	pub fn is_shared(&self) -> bool {
+		match &self.0 {
+			Buf::Block(block) => block.is_shared(),
+			Buf::Boxed(boxed) => boxed.is_shared(),
+			Buf::Slice(_    ) => true,
+		}
 	}
-	/// Returns a slice of unwritten bytes in the segment. [`grow`][] must be
-	/// called to complete a write operation. Forks shared memory.
+	/// Returns `true` if the segment contains exclusively-owned data and can be
+	/// written to. Opposite of [`is_shared`].
 	///
-	/// [`grow`]: Self::grow
-	pub fn data_mut<R: RangeBounds<usize>>(&mut self, range: R) -> &mut [u8] {
-		let range = slice::range(range, ..self.limit());
-		&mut self.mem.data_mut()[range]
-	}
-	/// Returns `true` if the segment is shared.
-	pub fn is_shared(&self) -> bool { self.mem.is_shared() }
-
-	/// Creates a new segment with memory shared from the current segment.
-	pub fn share_all(&self) -> Self {
-		Self::new(self.mem.share_all())
+	/// [`is_shared`]: Self::is_shared
+	pub fn is_exclusive(&self) -> bool {
+		!self.is_shared()
 	}
 
-	/// Creates a new segment with up to `count` bytes of memory shared from the
-	/// current segment.
-	pub fn share(&self, byte_count: usize) -> Self {
-		Self::new(self.mem.share(byte_count))
+	/// Clears data from the segment.
+	pub fn clear(&mut self) {
+		match &mut self.0 {
+			Buf::Block(block) => block.clear(),
+			Buf::Boxed(boxed) => boxed.clear(),
+			Buf::Slice(slice) => *slice = &slice[..0],
+		}
 	}
 
-	/// Copies shared data into owned memory.
-	pub fn fork(&mut self) {
-		self.mem.fork();
+	/// Returns a pair of slices, in order, containing the segment contents. If
+	/// the segment data is contiguous, all data is contained by the first slice
+	/// and the second is empty.
+	pub fn as_slices(&self) -> (&[u8], &[u8]) {
+		match &self.0 {
+			Buf::Block(block) => block.as_slices(),
+			Buf::Boxed(boxed) => boxed.as_slices(),
+			Buf::Slice(slice) => (slice, &[]),
+		}
 	}
 
-	/// Consumes `count` bytes after reading, without forking shared memory.
-	pub fn consume(&mut self, byte_count: usize) { self.mem.consume(byte_count) }
-
-	/// Truncates to `count` bytes, without forking shared memory.
-	pub fn truncate(&mut self, byte_count: usize) { self.mem.truncate(byte_count) }
-
-	/// Grows by `count` bytes after writing, forking if shared.
-	pub fn grow(&mut self, byte_count: usize) {
-		self.mem.fork();
-		self.mem.grow(byte_count)
+	/// Returns a pair of mutable slices, in order, containing the segment contents,
+	/// or `None` if the segment contains shared data.
+	pub fn as_mut_slices(&mut self) -> Option<(&mut [u8], &mut [u8])> {
+		match &mut self.0 {
+			Buf::Block(block) => block.as_mut_slices(),
+			Buf::Boxed(boxed) => boxed.as_mut_slices(),
+			_ => None
+		}
 	}
 
-	/// Clears the segment data, without forking shared memory.
-	pub fn clear(&mut self) { self.mem.clear() }
-
-	/// Shifts data back to offset zero, forking if shared.
-	pub fn shift(&mut self) { self.mem.shift() }
-
-	/// Pushes a byte onto the end of the segment, return `true` if the segment is
-	/// not full. This operation forks shared memory.
-	pub fn push(&mut self, byte: u8) -> bool { self.mem.push(byte) }
-
-	/// Pops a byte from the start of the segment. This operation is non-forking.
-	pub fn pop(&mut self) -> Option<u8> { self.mem.pop() }
-
-	/// Pushes a slice of bytes onto the end of the segment, returning the number
-	/// of bytes written. This operation forks shared memory.
-	pub fn push_slice(&mut self, bytes: &[u8]) -> usize {
-		self.mem.push_slice(bytes)
+	/// Returns a pair of slices, in order, containing the segment contents within
+	/// `range`.
+	pub fn as_slices_in_range<R: RangeBounds<usize>>(&self, range: R) -> (&[u8], &[u8]) {
+		match &self.0 {
+			Buf::Block(block) => block.as_slices_in_range(range),
+			Buf::Boxed(boxed) => boxed.as_slices_in_range(range),
+			Buf::Slice(slice) => {
+				let range = slice::range(range, ..slice.len());
+				(&slice[range], &[])
+			}
+		}
 	}
 
-	/// Pops data from the start of the segment into `bytes`, returning the number
-	/// of bytes read. This operation is non-forking.
-	pub fn pop_into_slice(&mut self, bytes: &mut [u8]) -> usize {
-		self.mem.pop_into_slice(bytes)
+	/// Makes the segment writable if its contents are shared, by allocating a new
+	/// block and copying the shared contents into it. If the data is too large for
+	/// a single block, a segment containing the remaining shared data is returned.
+	/// Claiming segments from a pool is recommended over this method, to avoid
+	/// unnecessary allocation.
+	///
+	/// Methods requiring unique access, namely [`write`] and [`as_mut_slices`]
+	/// *always* succeed after forking.
+	///
+	/// [`write`]: Self::write
+	/// [`as_mut_slices`]: Self::as_mut_slices
+	pub fn fork(&mut self) -> Option<Self> {
+		if !self.is_shared() { return None }
+		let buf = BlockDeque::populated(|buf| self.read(buf));
+		let rem = mem::replace(self, buf.into());
+		rem.is_not_empty().then_some(rem)
 	}
 
-	/// Moves up to `byte_count` bytes from the current segment into a `target`,
-	/// returning the number of bytes moved. Shared memory will only be forked in
-	/// `target`.
-	pub fn move_into(&mut self, target: &mut Self, offset: usize, mut byte_count: usize) -> usize {
-		byte_count = self.copy_into(target, offset, byte_count);
-		self.consume(byte_count);
-		byte_count
-	}
-
-	/// Moves all data from the current segment into a `target`, returning the
-	/// number of bytes moved. Shared memory will only be forked in `target`.
-	pub fn move_all_into(&mut self, target: &mut Self, offset: usize) -> usize {
-		let count = self.copy_all_into(target, offset);
-		self.consume(count);
+	/// Consumes up to `count` elements, returning the number elements consumed.
+	pub fn consume(&mut self, mut count: usize) -> usize {
+		count = min(count, self.len());
+		self.consume_unchecked(count);
 		count
 	}
 
-	/// Copies up to `byte_count` bytes from the current segment into a `target`,
-	/// returning the number of bytes copied. Shared memory will only be forked in
-	/// `target`.
-	pub fn copy_into(&self, target: &mut Self, offset: usize, mut byte_count: usize) -> usize {
-		if offset >= self.len() { return 0 }
-
-		byte_count = min(byte_count, self.len());
-		byte_count = target.push_slice(self.data(offset..byte_count));
-		byte_count
+	/// Truncates to a maximum of `count` elements, returning the element count.
+	pub fn truncate(&mut self, mut count: usize) -> usize {
+		count = min(count, self.len());
+		self.truncate_unchecked(count);
+		count
 	}
 
-	/// Copies all data from the current segment into a `target`, returning the
-	/// number of bytes copied. Shared memory will only be forked in `target`.
-	pub fn copy_all_into(&self, target: &mut Self, offset: usize) -> usize {
-		if offset >= self.len() { return 0 }
-		target.push_slice(self.data(offset..))
+	/// Copies the segment's contents into `buf`, returning the number of bytes
+	/// copied.
+	pub fn copy(&mut self, buf: &mut [u8]) -> usize {
+		buf.copy_from_pair(self.as_slices())
 	}
-	
-	/// Inserts `other` at the front of the current segment.
-	pub(crate) fn prefix_with(&mut self, other: &mut Self) {
-		assert!(other.len() + self.len() <= SIZE, "`other` is too large");
-		
-		let len = other.len() + self.len();
-		self.mem.shift_right(other.len());
-		self.clear();
-		other.move_all_into(self, 0);
-		self.grow(len);
+
+	/// Writes data from `other` into the segment to fill empty space if the segment
+	/// is writable, returning the number of bytes written, or `None` if the segment
+	/// contains shared data.
+	pub fn write_from<const O: usize>(&mut self, other: &mut Seg<'_, O>) -> Option<usize> {
+		let (a, b) = other.as_slices();
+		let mut written = self.write(a)?;
+		written += self.write(b)?;
+		other.consume_unchecked(written);
+		Some(written)
+	}
+
+	/// Reads the segment's contents into `buf` and consumes the data, returning
+	/// the number of bytes read.
+	pub fn read(&mut self, buf: &mut [u8]) -> usize {
+		match &mut self.0 {
+			Buf::Block(block) => block.drain_n(buf),
+			_ => {
+				let count = buf.copy_from_pair(self.as_slices_in_range(..buf.len()));
+				self.consume_unchecked(count);
+				count
+			}
+		}
+	}
+
+	/// Writes the contents of `buf` into the segment, returning the number of bytes
+	/// written, or `None` if the segment contains shared data.
+	pub fn write(&mut self, buf: &[u8]) -> Option<usize> {
+		match &mut self.0 {
+			Buf::Block(block) => block.extend_n(buf),
+			Buf::Boxed(boxed) => {
+				boxed.impose();
+				let target = boxed.buf()?;
+				let limit = target.capacity() - target.len();
+				let count = min(limit, buf.len());
+				target.extend(buf);
+				boxed.len += count;
+				Some(count)
+			}
+			_ => None
+		}
+	}
+
+	/// Forks shared memory, then writes the contents of `buf` into the segment,
+	/// returning the number of bytes written if successful. If the segment was too
+	/// large to cleanly fit into a block, the remaining shared data is returned in
+	/// `Err`. See [`fork`] for details.
+	///
+	/// [`fork`]: Self::fork
+	pub fn force_write(&mut self, buf: &[u8]) -> Result<usize, Self> {
+		match self.fork() {
+			Some(rem) => Err(rem),
+			None => Ok(
+				self.write(buf)
+					.expect("segment should be writable after clean fork")
+			)
+		}
+	}
+
+	/// If the segment is writable, shifts its contents such it fits in one contiguous
+	/// slice, returning that slice. Returns `None` if the segment is not writable.
+	pub fn shift(&mut self) -> Option<&mut [u8]> {
+		match &mut self.0 {
+			Buf::Block(block) => block.shift(),
+			Buf::Boxed(boxed) => {
+				boxed.impose();
+				Some(boxed.buf()?.make_contiguous())
+			}
+			_ => None
+		}
+	}
+
+	/// Pushes `value` to the back of the segment, returning it if the segment is
+	/// not writable or full.
+	pub fn push(&mut self, value: u8) -> Result<(), u8> {
+		match &mut self.0 {
+			Buf::Block(block) => block.push_back(value),
+			Buf::Boxed(boxed) => {
+				boxed.impose();
+				let Some(target) = boxed.buf() else {
+					return Err(value)
+				};
+				if target.capacity() - target.len() > 0 {
+					target.push_back(value);
+					boxed.len += 1;
+					Ok(())
+				} else {
+					Err(value)
+				}
+			}
+			Buf::Slice(_) => Err(value)
+		}
+	}
+
+	/// Shares the segment's contents within `range`.
+	pub fn share<R: RangeBounds<usize>>(&self, range: R) -> Seg<'d, N> {
+		let range = slice::range(range, ..self.len());
+		let mut seg = self.clone();
+		seg. consume_unchecked(range.start);
+		seg.truncate_unchecked(range.len());
+		seg
+	}
+
+	/// Shares the segment's contents.
+	pub fn share_all(&self) -> Seg<'d, N> { self.clone() }
+
+	/// Consumes the segment, creating a new segment without borrowed data. Shared
+	/// data is left alone. Panics if the segment is larger than the block size.
+	pub(crate) fn detach<'de>(
+		self,
+		pool: &impl Pool<N>
+	) -> Seg<'de, N> {
+		match self {
+			Self(Buf::Block(block)) => Seg(Buf::Block(block)),
+			Self(Buf::Boxed(boxed)) => Seg(Buf::Boxed(boxed)),
+			Self(Buf::Slice(slice)) => {
+				assert_gt!(slice.len(), N);
+				let mut target = pool.claim_one().unwrap_or_default();
+				assert_eq!(
+					target.write(slice).expect("claimed or allocated segment should be writable"),
+					slice.len()
+				);
+				target
+			}
+		}
+	}
+
+	/// Splits a slice segment off into slices of length `N` or shorter.
+	pub(crate) fn split_off_slice(&mut self) -> Option<(&'d [[u8; N]], &'d [u8])> {
+		if let Self(Buf::Slice(slice)) = self {
+			if slice.len() > N {
+				let (chunks, remainder) = slice.as_chunks();
+				*slice = &chunks[0];
+				Some((&chunks[1..], remainder))
+			} else {
+				None
+			}
+		} else {
+			None
+		}
+	}
+
+	/// Consumes the segment and returns its inner block of memory, if any. This is
+	/// intended for use by pool implementations to collect only blocks and discard
+	/// shared data.
+	pub fn into_block(self) -> Option<Box<[MaybeUninit<u8>; N]>> {
+		if let Buf::Block(block) = self.0 {
+			block.into_inner()
+		} else {
+			None
+		}
+	}
+
+	/// Iterates over bytes in the segment.
+	pub fn iter(&self) -> impl Iterator<Item = &u8> + '_ {
+		self.0.iter()
+	}
+}
+
+impl<'a, const N: usize> Seg<'a, N> {
+	pub(crate) unsafe fn set_len(&mut self, count: usize) {
+		let Buf::Block(block) = &mut self.0 else { return };
+		block.set_len(count)
+	}
+
+	pub(crate) unsafe fn inc_len(&mut self, count: usize) {
+		let Buf::Block(block) = &mut self.0 else { return };
+		block.set_len(block.len() + count);
+	}
+
+	pub(crate) fn spare_capacity_mut(&mut self) -> (&mut [MaybeUninit<u8>], &mut [MaybeUninit<u8>]) {
+		let Buf::Block(block) = &mut self.0 else {
+			return (&mut [], &mut [])
+		};
+		block.spare_capacity_mut()
+	}
+}
+
+impl<'d, const N: usize> Index<usize> for Seg<'d, N> {
+	type Output = u8;
+
+	fn index(&self, index: usize) -> &u8 {
+		let (a, b) = self.as_slices();
+		if index < a.len() {
+			&a[index]
+		} else {
+			&b[index]
+		}
+	}
+}
+
+impl<'d, const N: usize> Seg<'d, N> {
+	fn consume_unchecked(&mut self, count: usize) {
+		match &mut self.0 {
+			Buf::Block(block) => block.remove_count(count),
+			Buf::Boxed(boxed) => {
+				boxed.off += count;
+				boxed.len -= count;
+				boxed.impose();
+			}
+			Buf::Slice(slice) => *slice = &slice[min(slice.len(), count)..],
+		}
+	}
+
+	fn truncate_unchecked(&mut self, count: usize) {
+		if count == 0 {
+			self.clear();
+			return
+		}
+
+		match &mut self.0 {
+			Buf::Block(block) => block.truncate(count),
+			Buf::Boxed(boxed) => {
+				boxed.len = count;
+				boxed.impose();
+			}
+			Buf::Slice(slice) => *slice = &slice[..count],
+		}
+	}
+}
+
+impl<const N: usize, const O: usize> PartialEq<Seg<'_, O>> for Seg<'_, N> {
+	fn eq(&self, other: &Seg<'_, O>) -> bool {
+		self.0 == other.0
+	}
+}
+
+impl<const N: usize> PartialEq<[u8]> for Seg<'_, N> {
+	fn eq(&self, other: &[u8]) -> bool {
+		&self.0 == other
+	}
+}
+
+impl<const N: usize, T: AsRef<[u8]>> PartialEq<T> for Seg<'_, N> {
+	fn eq(&self, other: &T) -> bool {
+		self == other.as_ref()
 	}
 }
 
 #[cfg(test)]
-mod mem_test {
-	use quickcheck::{Arbitrary, Gen};
-	use quickcheck_macros::quickcheck;
-	use super::memory::Memory;
+mod test {
+	use super::Seg;
 
-	#[derive(Copy, Clone, Debug)]
-	struct ArbArray([u8; 256]);
+	const SLICE: &[u8] = b"Hello World!";
 
-	impl Arbitrary for ArbArray {
-		fn arbitrary(g: &mut Gen) -> Self {
-			let mut array = [0; 256];
-			for i in 0..256 {
-				array[i] = u8::arbitrary(g);
-			}
-			Self(array)
-		}
+	#[test]
+	fn slice_read() {
+		let mut word1 = [0; 5];
+		let mut word2 = [0; 5];
+		let mut seg: Seg = Seg::from(SLICE);
+		assert_eq!(seg.read(&mut word1), 5, "should read 5 bytes");
+		assert_eq!(seg.consume(1), 1, "should consume 1 byte");
+		assert_eq!(seg.read(&mut word2), 5, "should read 5 bytes");
+		assert_eq!(seg.consume(1), 1, "should consume 1 byte");
+		assert!(seg.is_empty(), "should be empty");
+		assert_eq!(&word1, b"Hello");
+		assert_eq!(&word2, b"World");
 	}
 
-	#[quickcheck]
-	fn memory(ArbArray(values): ArbArray) {
-		let mut mem: Memory<_, 256> = Memory::default();
-
-		for i in 0..128 {
-			assert!(mem.push(values[i]), "partial write: index {i} push");
-			assert_eq!(mem.off(), 0, "partial write: index {i} offset");
-			assert_eq!(mem.len(), i + 1, "partial write: index {i} length");
-			assert_eq!(mem.cnt(), i + 1, "partial write: index {i} count");
-		}
-
-		for i in 0..128 {
-			assert_eq!(mem.pop(), Some(values[i]), "partial read: index {i} pop");
-			assert_eq!(mem.off(), i + 1, "partial read: index {i} offset");
-			assert_eq!(mem.len(), 128, "partial read: index {i} length");
-			assert_eq!(mem.cnt(), 127 - i, "partial read: index {i} count");
-		}
-
-		for i in 128..256 {
-			assert!(mem.push(values[i]), "full write: index {i} push");
-			assert_eq!(mem.off(), 128, "full write: index {i} offset");
-			assert_eq!(mem.len(), i + 1, "full write: index {i} length");
-			assert_eq!(mem.cnt(), i + 1 - 128, "full write: index {i} count");
-		}
-
-		for i in 128..256 {
-			assert_eq!(mem.pop(), Some(values[i]), "full read: index {i} pop");
-			assert_eq!(mem.off(), i + 1, "full read: index {i} offset");
-			assert_eq!(mem.len(), 256, "full read: index {i} length");
-			assert_eq!(mem.cnt(), 255 - i, "full read: index {i} count");
-		}
-	}
-
-	/// Tests memory sharing and forking.
-	#[quickcheck]
-	fn memory_share(ArbArray(values): ArbArray) {
-		let mut mem_a: Memory<_, 256> = Memory::default();
-		mem_a.push_slice(&values);
-
-		let mut mem_b = mem_a.share(128);
-
-		let mut dst = [0; 128];
-		assert_eq!(
-			mem_b.pop_into_slice(&mut dst),
-			128,
-			"mem_b should fully pop a slice of size 128"
-		);
-		assert_eq!(mem_b.off(), mem_b.len(), "mem_b should have 128 bytes read");
-		assert_eq!(mem_b.cnt(), 0, "mem_b should be empty");
-		assert_eq!(&dst, &values[..128]);
-		assert_eq!(
-			mem_b.push_slice(&dst),
-			128,
-			"mem_b should fully push a 128 byte slice by forking"
-		);
-		assert_eq!(mem_b.data(), &dst, "mem_b data should match previously popped data");
-		assert_eq!(mem_b.off(), 0, "mem_b should be shifted due to forking");
-		assert_eq!(mem_b.len(), 128, "mem_b should have a length of 128 bytes");
-		assert_eq!(mem_b.cnt(), 128, "mem_b should contain 128 bytes");
-		assert_eq!(mem_a.data(), &values, "mem_a should be untouched after modifying mem_b");
-
-		mem_a.clear();
-		assert_eq!(mem_a.off(), 0, "mem_a should be cleared");
-		assert_eq!(mem_a.len(), 0, "mem_a should be cleared");
-		assert_eq!(mem_a.cnt(), 0, "mem_a should be cleared");
-		assert_eq!(mem_b.data(), &dst, "mem_b should be untouched after modifying mem_a");
+	#[test]
+	fn slice_write() {
+		let len = SLICE.len();
+		let mut seg: Seg = Seg::default();
+		assert_eq!(seg.write(SLICE), Some(len), "should write {len} bytes");
+		assert_eq!(seg.len(), len, "len == {len}");
+		assert_eq!(seg.as_slices(), (SLICE, &[][..]), "contained bytes should match written bytes");
 	}
 }

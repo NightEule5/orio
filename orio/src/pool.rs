@@ -1,210 +1,199 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cell::{RefCell, RefMut};
-use std::ops::{Deref, DerefMut};
+mod hack;
+
+use std::cell::{BorrowMutError, RefCell, RefMut};
+use std::default::Default;
+use std::iter::Map;
+use std::mem::MaybeUninit;
+use std::ops::{DerefMut, Range};
 use std::rc::Rc;
 use std::result;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use crate::{ErrorBox, SEGMENT_SIZE};
-use crate::segment::Segment;
+use super::segment::{alloc_block, Block, Seg, SIZE};
 
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum Error {
-	#[error("pool already being borrowed")]
-	Borrowed,
-	#[error("out of memory")]
-	OutOfMemory,
-	#[error(transparent)]
-	Other(#[from] ErrorBox),
+#[derive(Copy, Clone, Debug, thiserror::Error)]
+#[error("failed to borrow the pool")]
+pub struct PoolError;
+
+pub type Result<T = ()> = result::Result<T, PoolError>;
+
+impl From<BorrowMutError> for PoolError {
+	fn from(_: BorrowMutError) -> Self { Self }
 }
 
-#[derive(Copy, Clone, Debug, strum::Display)]
-#[strum(serialize_all = "lowercase")]
-pub enum Context {
-	Claim,
-	Collect,
-	Shed,
-}
+pub trait Pool<const N: usize = SIZE>: Clone {
+	type Pool: MutPool<N> + ?Sized;
+	type Ref<'p>: DerefMut<Target = Self::Pool> where Self: 'p;
 
-pub type Result<T = (), E = Error> = result::Result<T, E>;
+	/// Gets a shared reference to the pool.
+	fn get() -> Self;
 
-pub type DefaultPool = LocalPool;
+	/// Borrows the pool mutably, locking it for the duration of the borrow.
+	fn try_borrow(&self) -> Result<Self::Ref<'_>>;
 
-/// A segment pool.
-pub trait Pool: Sized {
 	/// Claims a single segment.
-	fn claim_one(&mut self) -> Segment;
+	fn claim_one<'d>(&self) -> Result<Seg<'d, N>> {
+		Ok(self.try_borrow()?.claim_one())
+	}
 
 	/// Claims `count` segments into `target`.
-	fn claim_count(&mut self, target: &mut impl Extend<Segment>, count: usize) {
-		target.extend_reserve(count);
-		for _ in 0..count {
-			target.extend_one(self.claim_one())
-		}
+	fn claim_count<'d>(&self, target: &mut impl Extend<Seg<'d, N>>, count: usize) -> Result {
+		use hack::MutPoolSpec;
+
+		Ok(self.try_borrow()?.claim_count_spec(target, count))
 	}
 
 	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size(&mut self, target: &mut impl Extend<Segment>, min_size: usize) {
-		let count = min_size.next_multiple_of(SEGMENT_SIZE) / SEGMENT_SIZE;
+	fn claim_size<'d>(&self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize) -> Result {
+		use hack::MutPoolSpec;
 
-		self.claim_count(target, count)
+		Ok(self.try_borrow()?.claim_size_spec(target, min_size))
 	}
 
 	/// Collects a single segment back into the pool.
-	fn collect_one(&mut self, segment: Segment);
+	fn collect_one(&self, segment: Seg<N>) -> Result {
+		if segment.is_shared() { return Ok(()) }
+
+		Ok(self.try_borrow()?.collect_one(segment))
+	}
 
 	/// Collects many segments back into the pool. Handling of shared segments is
 	/// left up to implementation; the default implementation discards them.
-	fn collect(&mut self, segments: impl IntoIterator<Item = Segment>) {
-		for mut seg in segments {
-			if !seg.is_shared() {
-				seg.clear();
-				self.collect_one(seg);
-			}
-		}
+	fn collect<'d>(&self, segments: impl IntoIterator<Item = Seg<'d, N>>) -> Result {
+		use hack::MutPoolSpec;
+
+		Ok(self.try_borrow()?.collect_spec(segments))
 	}
+
+	/// Clears segments from the pool to free space. The actual segment count to be
+	/// cleared is left up to implementation.
+	fn shed(&self) -> Result {
+		Ok(self.try_borrow()?.shed())
+	}
+}
+
+/// A mutably-borrowed pool, usually from a [`RefCell`].
+///
+/// Note on object-safety: this trait is object-safe for single-segment operations,
+/// but not for bulk operations.
+pub trait MutPool<const N: usize = SIZE> {
+	/// Reserves at least `count` segments in the pool.
+	fn claim_reserve(&mut self, count: usize);
+
+	/// Claims a single segment.
+	///
+	/// Lifetime note: the returned segment *must* be valid for any lifetime. This
+	/// means all ownership of the data in the segment is given to the caller. The
+	/// segment's internal buffer is guaranteed not to be a borrowed slice. It may
+	/// not be writable, since this lifetime doesn't preclude a shared `Rc` block
+	/// nor a boxed array.
+	///
+	/// On the implementation side, this makes it impossible to store segments in
+	/// the pool as-is. The default implementation only stores uniquely-owned `Rc`
+	/// blocks, then reconstructs segments from them.
+	fn claim_one<'d>(&mut self) -> Seg<'d, N>;
+
+	/// Claims `count` segments into `target`.
+	fn claim_count<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, count: usize) where Self: Sized;
+
+	/// Claims many segments into the container, at least `min_size` in total size.
+	fn claim_size<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize) where Self: Sized {
+		self.claim_count(target, min_size.div_ceil(N))
+	}
+
+	/// Reserves space to collect at least `count` segments into the pool.
+	fn collect_reserve(&mut self, count: usize);
+
+	/// Collects a single segment back into the pool.
+	fn collect_one(&mut self, segment: Seg<N>);
+
+	/// Collects many segments back into the pool. Handling of shared segments is
+	/// left up to implementation; the default implementation discards them.
+	fn collect<'d>(&mut self, segments: impl IntoIterator<Item = Seg<'d, N>>) where Self: Sized;
 
 	/// Clears segments from the pool to free space. The actual segment count to be
 	/// cleared is left up to implementation.
 	fn shed(&mut self);
 }
 
-/// A shared, internally-mutable segment pool.
-pub trait SharedPool {
-	/// Gets a shared instance of the pool.
-	fn get() -> Self;
-	
-	/// Locks the pool for the duration of the borrow. Useful for batch operations.
-	fn lock(&self) -> Result<impl DerefMut<Target = impl Pool> + '_>;
-
-	/// Claims a single segment.
-	fn claim_one(&self) -> Result<Segment> {
-		Ok(self.lock()?.claim_one())
-	}
-
-	/// Claims `count` segments into `target`.
-	fn claim_count(&self, target: &mut impl Extend<Segment>, count: usize) -> Result {
-		Ok(self.lock()?.claim_count(target, count))
-	}
-
-	/// Claims many segments into the container, at least `min_size` in total size.
-	fn claim_size(&self, target: &mut impl Extend<Segment>, min_size: usize) -> Result {
-		Ok(self.lock()?.claim_size(target, min_size))
-	}
-
-	/// Collects a single segment back into the pool.
-	fn collect_one(&self, segment: Segment) -> Result {
-		self.lock()?.collect_one(segment);
-		Ok(())
-	}
-
-	/// Collects many segments back into the pool. Handling of shared segments is
-	/// left up to implementation; the default implementation discards them.
-	fn collect(&self, segments: impl IntoIterator<Item = Segment>) -> Result {
-		self.lock()?.deref_mut().collect(segments);
-		Ok(())
-	}
-
-	/// Clears segments from the pool to free space. The actual segment count to be
-	/// cleared is left up to implementation.
-	fn shed(&self) -> Result {
-		self.lock()?.shed();
-		Ok(())
-	}
-}
-
-/// A basic [`Pool`] implementation using a [`Vec`].
 #[derive(Default)]
-pub struct BasicPool {
-	segments: Vec<Segment>
-}
+pub struct DefaultPool(Vec<Box<[MaybeUninit<u8>; SIZE]>>);
 
-impl Pool for BasicPool {
-	fn claim_one(&mut self) -> Segment {
-		self.claim().unwrap_or_default()
-	}
+#[derive(Clone)]
+pub struct DefaultPoolContainer(Rc<RefCell<DefaultPool>>);
 
-	fn claim_count(&mut self, target: &mut impl Extend<Segment>, count: usize) {
-		let ref mut segments = self.segments;
-		segments.resize_with(segments.len() + count, Default::default);
-		target.extend(segments.drain(..count));
-	}
-
-	fn collect_one(&mut self, segment: Segment) {
-		self.segments.push(segment);
-	}
-
-	fn collect(&mut self, segments: impl IntoIterator<Item = Segment>) {
-		self.segments.extend(
-			segments.into_iter()
-					.filter(|seg| !seg.is_shared())
-					.update(|seg| seg.clear())
-		);
-	}
-
-	fn shed(&mut self) {
-		self.segments.clear();
+impl Default for DefaultPoolContainer {
+	fn default() -> Self {
+		Self(Rc::new(DefaultPool::default().into()))
 	}
 }
 
-impl BasicPool {
-	fn claim(&mut self) -> Option<Segment> {
-		self.segments.pop()
+impl Pool<SIZE> for DefaultPoolContainer {
+	type Pool = DefaultPool;
+	type Ref<'p> = RefMut<'p, DefaultPool>;
+	fn get() -> Self { pool() }
+
+	fn try_borrow(&self) -> Result<Self::Ref<'_>> {
+		Ok(self.0.try_borrow_mut()?)
 	}
 }
 
-/// A [`Pool`] implementation with no storage. Instead, collected segments are
-/// dropped and claimed segments are created on-demand.
-#[derive(Copy, Clone, Default)]
-pub struct VoidPool;
-
-impl Deref for VoidPool {
-	type Target = Self;
-
-	fn deref(&self) -> &Self { self }
-}
-
-impl DerefMut for VoidPool {
-	fn deref_mut(&mut self) -> &mut Self { self }
-}
-
-impl Pool for VoidPool {
-	fn claim_one(&mut self) -> Segment { Segment::default() }
-
-	fn collect_one(&mut self, _: Segment) { }
-
-	fn shed(&mut self) { }
-}
-
-impl SharedPool for VoidPool {
-	fn get() -> Self { Self }
-
-	fn lock(&self) -> Result<Self> { Ok(*self) }
-}
+/// Clones a shared reference to the default segment pool.
+#[inline]
+pub fn pool() -> DefaultPoolContainer { POOL.clone() }
 
 #[thread_local]
-static LOCAL: Lazy<LocalPool> = Lazy::new(LocalPool::default);
+static POOL: Lazy<DefaultPoolContainer> = Lazy::new(DefaultPoolContainer::default);
 
-/// The default thread-local [`SharedPool`] implementation.
-#[derive(Clone)]
-pub struct LocalPool {
-	inner: Rc<RefCell<BasicPool>>
-}
-
-impl Default for LocalPool {
-	fn default() -> Self {
-		Self { inner: Rc::new(RefCell::default()) }
+impl DefaultPool {
+	fn allocate(count: usize) -> Map<Range<usize>, fn(usize) -> Block> {
+		(0..count).map(|_| alloc_block())
 	}
 }
 
-impl SharedPool for LocalPool {
-	fn get() -> Self { LOCAL.clone() }
-
-	fn lock(&self) -> Result<RefMut<'_, BasicPool>> {
-		self.inner
-			.try_borrow_mut()
-			.map_err(|_| Error::Borrowed)
+impl MutPool for DefaultPool {
+	fn claim_reserve(&mut self, count: usize) {
+		let Self(vec) = self;
+		let existing_count = count.min(vec.len());
+		let allocate_count = count - existing_count;
+		vec.extend(Self::allocate(allocate_count));
 	}
+
+	fn claim_one<'d>(&mut self) -> Seg<'d> {
+		self.0.pop().unwrap_or_else(alloc_block).into()
+	}
+
+	fn claim_count<'d>(&mut self, target: &mut impl Extend<Seg<'d>>, count: usize) where Self: Sized {
+		if count == 1 {
+			target.extend_one(self.claim_one());
+		} else {
+			let Self(vec) = self;
+			let existing_count = count.min(vec.len());
+			let allocate_count = count - existing_count;
+			target.extend(
+				self.0
+					.drain(..existing_count)
+					.chain(Self::allocate(allocate_count))
+					.map_into()
+			);
+		}
+	}
+
+	fn collect_reserve(&mut self, count: usize) {
+		self.0.reserve(count)
+	}
+
+	fn collect_one(&mut self, segment: Seg) {
+		if let Some(block) = segment.into_block() {
+			self.0.push(block)
+		}
+	}
+
+	fn collect<'d>(&mut self, segments: impl IntoIterator<Item = Seg<'d>>) {
+		self.0.extend(segments.into_iter().filter_map(Seg::into_block))
+	}
+
+	fn shed(&mut self) { self.0.clear() }
 }

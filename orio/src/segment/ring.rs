@@ -398,7 +398,11 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	unsafe fn inc_len(&mut self, len: usize) {
 		debug_assert_eq!(
 			self.len + len,
-			self.buf.iter().rposition(Seg::is_not_empty).unwrap_or_default()
+			self.buf
+				.iter()
+				.rposition(Seg::is_not_empty)
+				.map(|i| i + 1)
+				.unwrap_or_default()
 		);
 		self.len += len;
 	}
@@ -409,7 +413,11 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		debug_assert_le!(len, self.len);
 		debug_assert_eq!(
 			self.len - len,
-			self.buf.iter().rposition(Seg::is_not_empty).unwrap_or_default()
+			self.buf
+				.iter()
+				.rposition(Seg::is_not_empty)
+				.map(|i| i + 1)
+				.unwrap_or_default()
 		);
 		self.len -= len;
 	}
@@ -457,7 +465,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	fn back_index(&self) -> Option<usize> {
 		(!self.is_empty())
 			.then(|| self.len - 1)
-			.filter(|&i| self.buf[i].is_full())
+			.filter(|&i| !self.buf[i].is_full())
 			.or_else(|| self.has_empty().then_some(self.len))
 	}
 

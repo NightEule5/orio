@@ -9,8 +9,9 @@ mod void;
 
 pub use seeking::*;
 pub use void::*;
-use crate::{Buffer, BufferResult, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
+use crate::{Buffer, BufferResult, Error, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
 use crate::buffered_wrappers::{BufferedSink, BufferedSource};
+use crate::error::Context;
 use crate::pattern::Pattern;
 use crate::StreamContext::{Read, Write};
 
@@ -81,6 +82,16 @@ pub trait Stream<const N: usize> {
 		}
 
 		self.close_spec()
+	}
+	/// Checks whether the stream is open, returning an error if closed.
+	#[inline]
+	#[allow(private_bounds)]
+	fn check_open<C: Context>(&self, context: C) -> Result<(), Error<C>> {
+		if self.is_closed() {
+			Err(Error::closed(context))
+		} else {
+			Ok(())
+		}
 	}
 }
 
@@ -244,6 +255,7 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 	///
 	/// [`request`]: Self::request
 	fn require(&mut self, count: usize) -> Result<()> {
+		self.check_open(Read)?;
 		if count > 0 && (self.is_eos() || !self.request(count)?) {
 			return Err(StreamError::end_of_stream(count, Read))
 		}

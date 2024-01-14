@@ -154,7 +154,7 @@ impl DefaultPool {
 }
 
 impl MutPool for DefaultPool {
-	fn claim_reserve(&mut self, mut count: usize) {
+	fn claim_reserve(&mut self, count: usize) {
 		let Self(vec) = self;
 		let existing_count = count.min(vec.len());
 		let allocate_count = count - existing_count;

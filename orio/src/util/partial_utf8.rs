@@ -49,7 +49,11 @@ impl CharBuf {
 			.try_extend_from_slice(&bytes[..fill_count])
 			.expect("character buffer should be large enough");
 		*bytes = &bytes[fill_count..];
-		self.decode().map(str::to_owned)
+		let decoded = self.decode().map(str::to_owned);
+		if decoded.is_some() {
+			self.buf.clear();
+		}
+		decoded
 	}
 
 	pub fn push(&mut self, bytes: &[u8]) {

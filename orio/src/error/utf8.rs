@@ -96,7 +96,7 @@ impl Utf8Error {
 			"data should be valid UTF-8 up to {}",
 			self.valid_up_to
 		);
-		(from_utf8_unchecked(valid), &invalid[..invalid_len])
+		(from_utf8_unchecked(valid), &invalid[..invalid_len.min(invalid.len())])
 	}
 }
 

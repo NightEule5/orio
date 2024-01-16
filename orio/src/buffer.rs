@@ -12,9 +12,9 @@ use std::fmt::{Debug, Formatter};
 use std::ops::{Range, RangeBounds};
 use all_asserts::assert_ge;
 use itertools::Itertools;
-use crate::pool::{DefaultPoolContainer, Pool, pool};
-use crate::{BufferResult as Result, ByteStr, ResultContext, ResultSetContext, Seg, StreamContext, StreamResult};
-use crate::BufferContext::{Clear, Copy, Read, Reserve, Resize};
+use crate::pool::{DefaultPoolContainer, Pool, pool, PoolExt};
+use crate::{BufferResult as Result, ByteStr, ResultContext, ResultSetContext, Seg, StreamResult};
+use crate::BufferContext::{Copy, Reserve, Resize};
 use crate::pattern::Pattern;
 use crate::segment::RBuf;
 use crate::streams::{BufSink, BufStream, Seekable, SeekOffset, Stream};
@@ -275,16 +275,31 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	}
 
 	/// Clears data from the buffer.
-	pub fn clear(&mut self) -> Result {
+	pub fn clear(&mut self) {
+		let Err(_) = self.pool.try_use(|mut pool| {
+			use crate::pool::MutPool;
+
+			// Take the internal ring buffer instead of draining. This should be
+			// significantly faster.
+			let segments = mem::take(&mut self.data).buf;
+
+			(&mut pool).collect(segments);
+		}) else { return };
+
+		// Returning segments to the pool failed, clear and retain them instead.
+
 		for seg in self.data.iter_mut() {
 			seg.clear();
 		}
-		// Take the internal ring buffer instead of draining. This should be
-		// significantly faster.
-		let segments = self.take_buf().buf;
-		self.pool
-			.collect(segments)
-			.context(Clear)
+
+		unsafe {
+			// Safety: all segments have been cleared.
+			self.data.set_len(0);
+			self.data.set_count(0);
+		}
+
+		// Drop shared segments
+		self.data.buf.retain(Seg::is_exclusive);
 	}
 
 	/// Reserves at least `count` bytes of additional memory in the buffer.
@@ -362,10 +377,10 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	}
 
 	/// Skips up to `count` bytes.
-	pub fn skip(&mut self, count: usize) -> Result<usize> {
+	pub fn skip(&mut self, count: usize) -> usize {
 		if count >= self.count() {
-			self.clear().set_context(Read)?;
-			return Ok(count)
+			self.clear();
+			return count
 		}
 
 		let mut seg_count = 0;
@@ -379,11 +394,23 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 				break
 			}
 		}
-		self.data.consume(skipped);
-		self.pool
-			.collect(self.data.drain(seg_count))
-			.context(Read)?;
-		Ok(count)
+
+		let Err(_) = self.pool.try_use(|mut pool| {
+			use crate::pool::MutPool;
+
+			(&mut pool).collect(self.data.drain(seg_count));
+		}) else { return skipped };
+
+		// Returning segments to the pool failed, retain them instead.
+
+		unsafe {
+			// Safety: bytes have been skipped in these segments.
+			self.data.dec_count(skipped);
+		}
+		self.data.rotate_back(seg_count);
+		// Drop empty, shared segments
+		self.data.buf.retain(|seg| seg.is_not_empty() || seg.is_exclusive());
+		skipped
 	}
 
 	/// Finds `pattern` within `range` in the buffer, returning the matching byte
@@ -414,9 +441,47 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		None
 	}
 
+	/// Returns a new buffer containing data shared with this buffer in `range`.
+	/// Runs in at most `O(n)` time, where `n` is the number of segments.
+	pub fn range<R: RangeBounds<usize>>(&self, range: R) -> Self {
+		let range = slice::range(range, ..self.count());
+		if range == (0..self.count()) {
+			return self.clone()
+		}
+
+		let mut deque = Vec::with_capacity(self.data.len());
+		deque.extend(self.data.share_range(range));
+		Self {
+			data: deque.into(),
+			pool: self.pool.clone(),
+			..*self
+		}
+	}
+
 	/// Borrows the contents of the buffer as a [byte string](ByteStr).
 	pub fn as_byte_str(&self) -> ByteStr {
 		(&self.data).into()
+	}
+
+
+	/// Updates `hasher` with buffer data.
+	#[cfg(feature = "hash")]
+	pub fn hash(&self, hasher: &mut impl digest::Digest) {
+		for slice in self.data.iter_slices() {
+			hasher.update(slice);
+		}
+	}
+
+	/// Updates `hasher` with buffer data within `range`.
+	#[cfg(feature = "hash")]
+	pub fn hash_in_range<R: RangeBounds<usize>>(
+		&self,
+		range: R,
+		hasher: &mut impl digest::Digest
+	) {
+		for slice in self.data.iter_slices_in_range(range) {
+			hasher.update(slice);
+		}
 	}
 }
 
@@ -439,6 +504,16 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	pub(crate) fn take_buf(&mut self) -> RBuf<Seg<'d, N>> {
 		mem::take(&mut self.data)
 	}
+
+	/// Returns a new buffer containing this buffer's internal data, leaving an
+	/// empty buffer in its place.
+	pub(crate) fn take(&mut self) -> Self {
+		Self {
+			data: self.take_buf(),
+			pool: self.pool.clone(),
+			..*self
+		}
+	}
 }
 
 impl<const N: usize, P: Pool<N>> Drop for Buffer<'_, N, P> {
@@ -454,7 +529,7 @@ impl<const N: usize, P: Pool<N>> Stream<N> for Buffer<'_, N, P> {
 	/// Clears the buffer.
 	#[inline]
 	fn close(&mut self) -> StreamResult {
-		self.clear()?;
+		self.clear();
 		Ok(())
 	}
 }
@@ -480,9 +555,9 @@ impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {
 	/// returned. Seeking forward of by offset from start or end returns the number
 	/// of bytes skipped.
 	fn seek(&mut self, offset: SeekOffset) -> StreamResult<usize> {
-		self.skip(
-			offset.to_pos(0, self.count())
-		).context(StreamContext::Seek)
+		Ok(
+			self.skip(offset.to_pos(0, self.count()))
+		)
 	}
 
 	/// Returns the [`count`][].

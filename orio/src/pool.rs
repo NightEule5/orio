@@ -74,6 +74,15 @@ pub trait Pool<const N: usize = SIZE>: Clone {
 	}
 }
 
+pub trait PoolExt<const N: usize>: Pool<N> {
+	fn try_use<R>(&self, f: impl FnOnce(&mut Self::Pool) -> R) -> Result<R> {
+		let mut pool = self.try_borrow()?;
+		Ok(f(&mut pool))
+	}
+}
+
+impl<const N: usize, P: Pool<N>> PoolExt<N> for P { }
+
 /// A mutably-borrowed pool, usually from a [`RefCell`].
 ///
 /// Note on object-safety: this trait is object-safe for single-segment operations,

@@ -113,8 +113,7 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 			self.data.iter_slices_in_range(..count),
 			buf
 		).context(Read)?;
-		self.skip(read)
-			.context(Read)
+		Ok(self.skip(read))
 	}
 
 	#[inline]
@@ -138,7 +137,7 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		if let Some(range) = self.find(terminator) {
 			let count = self.read_utf8(buf, range.start)?;
-			self.skip(range.len())?;
+			self.skip(range.len());
 			Ok((count, true).into())
 		} else {
 			self.read_utf8_to_end(buf)
@@ -205,7 +204,7 @@ impl<'a, const N: usize, P: Pool<N>> Buffer<'a, N, P> {
 			count = written;
 			result.context(Drain)
 		};
-		count = self.skip(count).set_context(Drain)?;
+		count = self.skip(count);
 		result?;
 		Ok(count)
 	}

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{Buffer, BufferResult as Result, Error, ResultContext, StreamResult};
+use crate::{Buffer, BufferResult as Result, Error, StreamResult};
 use crate::BufferContext::{Drain, Fill};
 use crate::pool::Pool;
 use super::{Sink, Source, Stream};
@@ -35,7 +35,7 @@ impl<'d, const N: usize> Sink<'d, N> for VoidSink {
 			// Obey the closing rule.
 			Err(Error::closed(Drain))
 		} else if count < source.count() {
-			source.skip(count).context(Drain)
+			Ok(source.skip(count))
 		} else {
 			self.drain_all(source)
 		}
@@ -48,7 +48,7 @@ impl<'d, const N: usize> Sink<'d, N> for VoidSink {
 			Err(Error::closed(Drain))
 		} else {
 			let count = source.count();
-			source.clear().context(Drain)?;
+			source.clear();
 			Ok(count)
 		}
 	}

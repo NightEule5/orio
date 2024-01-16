@@ -46,3 +46,45 @@ impl<const N: usize, P: MutPool<N> + ?Sized> MutPoolSpec<N> for P {
 		}
 	}
 }
+
+impl<const N: usize, P: MutPool<N> + ?Sized> MutPool<N> for &mut P {
+	#[inline]
+	fn claim_reserve(&mut self, count: usize) {
+		P::claim_reserve(self, count);
+	}
+
+	#[inline]
+	fn claim_one<'d>(&mut self) -> Seg<'d, N> {
+		P::claim_one(self)
+	}
+
+	#[inline]
+	fn claim_count<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, count: usize) where Self: Sized {
+		P::claim_count_spec(self, target, count);
+	}
+
+	#[inline]
+	fn claim_size<'d>(&mut self, target: &mut impl Extend<Seg<'d, N>>, min_size: usize) where Self: Sized {
+		P::claim_size_spec(self, target, min_size);
+	}
+
+	#[inline]
+	fn collect_reserve(&mut self, count: usize) {
+		P::collect_reserve(self, count);
+	}
+
+	#[inline]
+	fn collect_one(&mut self, segment: Seg<N>) {
+		P::collect_one(self, segment);
+	}
+
+	#[inline]
+	fn collect<'d>(&mut self, segments: impl IntoIterator<Item = Seg<'d, N>>) where Self: Sized {
+		P::collect_spec(self, segments);
+	}
+
+	#[inline]
+	fn shed(&mut self) {
+		P::shed(self);
+	}
+}

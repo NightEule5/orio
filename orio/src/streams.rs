@@ -2,7 +2,7 @@
 
 use std::result;
 use num_traits::PrimInt;
-use crate::pool::Pool;
+use crate::pool::{DefaultPoolContainer, Pool};
 
 mod seeking;
 mod void;
@@ -12,7 +12,7 @@ pub use seeking::*;
 pub use void::*;
 pub use hashing::*;
 use crate::{Buffer, BufferResult, Error, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
-use crate::buffered_wrappers::{BufferedSink, BufferedSource};
+pub use crate::buffered_wrappers::{BufferedSink, BufferedSource};
 use crate::error::Context;
 use crate::pattern::Pattern;
 use crate::StreamContext::{Read, Write};
@@ -154,8 +154,8 @@ pub trait SourceExt<'d, const N: usize, P: Pool<N>>: Source<'d, N> + Sized {
 	fn buffered(self) -> Self::Buffered;
 }
 
-impl<'d, S: Source<'d, SIZE>, P: Pool<SIZE>> SourceExt<'d, SIZE, P> for S {
-	type Buffered = BufferedSource<'d, Self, P>;
+impl<'d, S: Source<'d, SIZE>> SourceExt<'d, SIZE, DefaultPoolContainer> for S {
+	type Buffered = BufferedSource<'d, Self, DefaultPoolContainer>;
 
 	fn buffered(self) -> Self::Buffered {
 		BufferedSource::new(self, Buffer::default())

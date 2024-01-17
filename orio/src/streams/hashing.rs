@@ -98,7 +98,7 @@ impl<'d, H, S: Source<'d, N>, const N: usize> HashSource<'d, H, S, N> {
 		unsafe {
 			// Safety: option will only be None if into_inner is called, but this
 			// consumes and drops self, making it impossible to ever have a
-			// reference.
+			// reference (except on drop, which is guarded).
 			self.source.as_ref().unwrap_unchecked()
 		}
 	}
@@ -108,7 +108,7 @@ impl<'d, H, S: Source<'d, N>, const N: usize> HashSource<'d, H, S, N> {
 		unsafe {
 			// Safety: option will only be None if into_inner is called, but this
 			// consumes and drops self, making it impossible to ever have a
-			// reference.
+			// reference (except on drop, which is guarded).
 			self.source.as_mut().unwrap_unchecked()
 		}
 	}
@@ -160,7 +160,7 @@ impl<'d, H, S: Sink<'d, N>, const N: usize> HashSink<'d, H, S, N> {
 		unsafe {
 			// Safety: option will only be None if into_inner is called, but this
 			// consumes and drops self, making it impossible to ever have a
-			// reference.
+			// reference (except on drop, which is guarded).
 			self.sink.as_ref().unwrap_unchecked()
 		}
 	}
@@ -170,7 +170,7 @@ impl<'d, H, S: Sink<'d, N>, const N: usize> HashSink<'d, H, S, N> {
 		unsafe {
 			// Safety: option will only be None if into_inner is called, but this
 			// consumes and drops self, making it impossible to ever have a
-			// reference.
+			// reference (except on drop, which is guarded).
 			self.sink.as_mut().unwrap_unchecked()
 		}
 	}
@@ -313,7 +313,10 @@ impl<'d, H: Clone + Default + Digest, S: BufSource<'d, N>, const N: usize> BufSo
 
 impl<'d, H, S: Source<'d, N>, const N: usize> Drop for HashSource<'d, H, S, N> {
 	fn drop(&mut self) {
-		let _ = self.close();
+		// If into_inner was called, closing would cause a seg fault.
+		if self.source.is_some() {
+			let _ = self.close();
+		}
 	}
 }
 
@@ -431,7 +434,10 @@ impl<'d, H: Digest, S: BufSink<'d, N>, const N: usize> BufSink<'d, N> for HashSi
 
 impl<'d, H, S: Sink<'d, N>, const N: usize> Drop for HashSink<'d, H, S, N> {
 	fn drop(&mut self) {
-		let _ = self.close();
+		// If into_inner was called, closing would cause a seg fault.
+		if self.sink.is_some() {
+			let _ = self.close();
+		}
 	}
 }
 

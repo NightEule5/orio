@@ -7,10 +7,14 @@ use crate::pool::{DefaultPoolContainer, Pool};
 mod seeking;
 mod void;
 mod hashing;
+mod file;
+mod std_io;
 
 pub use seeking::*;
 pub use void::*;
 pub use hashing::*;
+pub use file::*;
+pub use std_io::*;
 use crate::{Buffer, BufferResult, Error, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
 pub use crate::buffered_wrappers::{BufferedSink, BufferedSource};
 use crate::error::Context;

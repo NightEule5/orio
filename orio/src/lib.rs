@@ -66,10 +66,8 @@ mod element;
 pub mod pool;
 mod util;
 pub mod pattern;
-mod std_io;
 
 pub use error::*;
 pub use buffer::*;
 pub use byte_str::*;
 pub use segment::*;
-pub use std_io::*;

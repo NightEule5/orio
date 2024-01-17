@@ -263,6 +263,16 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	pub fn drain_all_empty(&mut self) -> impl Iterator<Item = Seg<'a, N>> + '_ {
 		self.drain_empty(self.capacity() - self.len)
 	}
+	
+	/// Iterates over shared segments in `range`.
+	pub fn share_range<R: RangeBounds<usize>>(&self, range: R) -> RangeIter<'a, '_, N> {
+		let range = slice::range(range, ..self.count);
+		RangeIter {
+			iter: self.buf.range(..self.len),
+			start: range.start,
+			count: range.len(),
+		}
+	}
 
 	/// Returns an iterator over segment slices in `range`.
 	pub fn iter_slices_in_range<R: RangeBounds<usize>>(&self, range: R) -> SliceRangeIter<'a, '_, N> {
@@ -393,53 +403,51 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		self.inc_len(seg_count);
 		self.inc_count(count);
 	}
+	
+	/// Sets the tracked length.
+	pub unsafe fn set_len(&mut self, len: usize) {
+		debug_assert_eq!(
+			len,
+			self.buf
+				.iter()
+				.rposition(Seg::is_not_empty)
+				.map(|i| i + 1)
+				.unwrap_or_default()
+		);
+		self.len = len;
+	}
 
 	/// Increments the tracked length after writing.
 	unsafe fn inc_len(&mut self, len: usize) {
-		debug_assert_eq!(
-			self.len + len,
-			self.buf
-				.iter()
-				.rposition(Seg::is_not_empty)
-				.map(|i| i + 1)
-				.unwrap_or_default()
-		);
-		self.len += len;
+		self.set_len(self.len + len);
 	}
 
 	/// Decrements the tracked length after reading.
-	unsafe fn dec_len(&mut self, len: usize) {
+	pub unsafe fn dec_len(&mut self, len: usize) {
 		use all_asserts::assert_le;
 		debug_assert_le!(len, self.len);
+		self.set_len(self.len - len);
+	}
+	
+	/// Sets the tracked count.
+	pub unsafe fn set_count(&mut self, count: usize) {
 		debug_assert_eq!(
-			self.len - len,
-			self.buf
-				.iter()
-				.rposition(Seg::is_not_empty)
-				.map(|i| i + 1)
-				.unwrap_or_default()
+			self.count,
+			self.iter().map(Seg::len).sum()
 		);
-		self.len -= len;
+		self.count = count;
 	}
 
 	/// Increments the tracked count after writing.
 	unsafe fn inc_count(&mut self, count: usize) {
-		debug_assert_eq!(
-			self.count + count,
-			self.iter().map(Seg::len).sum()
-		);
-		self.count += count;
+		self.set_count(self.count + count);
 	}
 
 	/// Decrements the tracked count after reading.
-	unsafe fn dec_count(&mut self, count: usize) {
+	pub unsafe fn dec_count(&mut self, count: usize) {
 		use all_asserts::assert_le;
 		debug_assert_le!(count, self.count);
-		debug_assert_eq!(
-			self.count - count,
-			self.iter().map(Seg::len).sum()
-		);
-		self.count -= count;
+		self.set_count(self.count - count);
 	}
 }
 
@@ -577,6 +585,12 @@ impl<T: PartialEq> PartialEq for RBuf<T> {
 	}
 }
 
+pub struct RangeIter<'a: 'b, 'b, const N: usize> {
+	iter: vec_deque::Iter<'b, Seg<'a, N>>,
+	start: usize,
+	count: usize,
+}
+
 pub struct SliceRangeIter<'a: 'b, 'b, const N: usize> {
 	iter: Skip<vec_deque::Iter<'b, Seg<'a, N>>>,
 	first_offset: usize,
@@ -584,6 +598,29 @@ pub struct SliceRangeIter<'a: 'b, 'b, const N: usize> {
 	count: usize,
 	cur_count: usize,
 	current: Option<(&'b [u8], &'b [u8])>
+}
+
+impl<'a: 'b, 'b, const N: usize> Iterator for RangeIter<'a, 'b, N> {
+	type Item = Seg<'a, N>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.count == 0 {
+			return None
+		}
+		
+		let mut cur = self.iter.find_map(|seg| {
+			if seg.len() > self.start {
+				let shared = seg.share(self.start..);
+				self.start = 0;
+				Some(shared)
+			} else {
+				self.start -= seg.len();
+				None
+			}
+		})?;
+		self.count -= cur.truncate(self.count);
+		Some(cur)
+	}
 }
 
 impl<'a: 'b, 'b, const N: usize> Iterator for SliceRangeIter<'a, 'b, N> {

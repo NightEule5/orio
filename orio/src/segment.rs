@@ -195,7 +195,11 @@ impl<'d, const N: usize> Seg<'d, N> {
 		match &mut self.0 {
 			Buf::Block(block) => block.drain_n(buf),
 			_ => {
-				let count = buf.copy_from_pair(self.as_slices_in_range(..buf.len()));
+				let count = buf.copy_from_pair(
+					self.as_slices_in_range(
+						..buf.len().min(self.len())
+					)
+				);
 				self.consume_unchecked(count);
 				count
 			}

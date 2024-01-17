@@ -2,15 +2,17 @@
 
 use std::result;
 use num_traits::PrimInt;
-use crate::pool::Pool;
+use crate::pool::{DefaultPoolContainer, Pool};
 
 mod seeking;
 mod void;
+mod hashing;
 
 pub use seeking::*;
 pub use void::*;
+pub use hashing::*;
 use crate::{Buffer, BufferResult, Error, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
-use crate::buffered_wrappers::{BufferedSink, BufferedSource};
+pub use crate::buffered_wrappers::{BufferedSink, BufferedSource};
 use crate::error::Context;
 use crate::pattern::Pattern;
 use crate::StreamContext::{Read, Write};
@@ -152,8 +154,8 @@ pub trait SourceExt<'d, const N: usize, P: Pool<N>>: Source<'d, N> + Sized {
 	fn buffered(self) -> Self::Buffered;
 }
 
-impl<'d, S: Source<'d, SIZE>, P: Pool<SIZE>> SourceExt<'d, SIZE, P> for S {
-	type Buffered = BufferedSource<'d, Self, P>;
+impl<'d, S: Source<'d, SIZE>> SourceExt<'d, SIZE, DefaultPoolContainer> for S {
+	type Buffered = BufferedSource<'d, Self, DefaultPoolContainer>;
 
 	fn buffered(self) -> Self::Buffered {
 		BufferedSource::new(self, Buffer::default())
@@ -278,7 +280,9 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 
 	/// Removes up to `count` bytes, returning the number of bytes skipped.
 	fn skip(&mut self, count: usize) -> Result<usize> {
-		self.read_count_spec(count, Buffer::skip)
+		self.read_count_spec(count, |buf, count|
+			Ok::<_, StreamError>(buf.skip(count))
+		)
 	}
 
 	/// Reads bytes into a slice, returning the number of bytes read.
@@ -730,3 +734,432 @@ trait BufSinkSpec<'d, const N: usize>: BufSink<'d, N> {
 }
 
 impl<'d, const N: usize, T: BufSink<'d, N> + ?Sized> BufSinkSpec<'d, N> for T { }
+
+impl<const N: usize, T: Stream<N> + ?Sized> Stream<N> for &mut T {
+	#[inline]
+	fn is_closed(&self) -> bool {
+		T::is_closed(self)
+	}
+
+	#[inline]
+	fn close(&mut self) -> Result {
+		T::close(self)
+	}
+}
+
+impl<'d, const N: usize, S: Source<'d, N> + ?Sized> Source<'d, N> for &mut S {
+	#[inline]
+	fn is_eos(&self) -> bool {
+		S::is_eos(self)
+	}
+
+	#[inline]
+	fn fill(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>, count: usize) -> BufferResult<usize> {
+		S::fill(self, sink, count)
+	}
+
+	#[inline]
+	fn fill_free(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
+		S::fill_free(self, sink)
+	}
+
+	#[inline]
+	fn fill_all(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
+		S::fill_all(self, sink)
+	}
+}
+
+impl<'d, const N: usize, S: Sink<'d, N> + ?Sized> Sink<'d, N> for &mut S {
+	#[inline]
+	fn drain(&mut self, source: &mut Buffer<'d, N, impl Pool<N>>, count: usize) -> BufferResult<usize> {
+		S::drain(self, source, count)
+	}
+
+	#[inline]
+	fn drain_full(&mut self, source: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
+		S::drain_full(self, source)
+	}
+
+	#[inline]
+	fn drain_all(&mut self, source: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
+		S::drain_all(self, source)
+	}
+
+	#[inline]
+	fn flush(&mut self) -> Result {
+		S::flush(self)
+	}
+}
+
+impl<'d, const N: usize, S: BufStream<'d, N> + ?Sized> BufStream<'d, N> for &mut S {
+	type Pool = S::Pool;
+
+	#[inline]
+	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, Self::Pool> {
+		S::buf(self)
+	}
+
+	#[inline]
+	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, Self::Pool> {
+		S::buf_mut(self)
+	}
+}
+
+impl<'d, const N: usize, S: BufSource<'d, N> + ?Sized> BufSource<'d, N> for &mut S {
+	#[inline]
+	fn available(&self) -> usize {
+		S::available(self)
+	}
+
+	#[inline]
+	fn request(&mut self, count: usize) -> Result<bool> {
+		S::request(self, count)
+	}
+
+	#[inline]
+	fn require(&mut self, count: usize) -> Result<()> {
+		S::require(self, count)
+	}
+
+	#[inline]
+	fn read(&mut self, sink: &mut impl Sink<'d, N>, count: usize) -> Result<usize> {
+		S::read(self, sink, count)
+	}
+
+	#[inline]
+	fn read_all(&mut self, sink: &mut impl Sink<'d, N>) -> Result<usize> {
+		S::read_all(self, sink)
+	}
+
+	#[inline]
+	fn skip(&mut self, count: usize) -> Result<usize> {
+		S::skip(self, count)
+	}
+
+	#[inline]
+	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
+		S::read_slice(self, buf)
+	}
+
+	#[inline]
+	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
+		S::read_slice_exact(self, buf)
+	}
+
+	#[inline]
+	fn read_array<const T: usize>(&mut self) -> Result<[u8; T]> {
+		S::read_array(self)
+	}
+
+	#[inline]
+	fn read_u8(&mut self) -> Result<u8> {
+		S::read_u8(self)
+	}
+
+	#[inline]
+	fn read_i8(&mut self) -> Result<i8> {
+		S::read_i8(self)
+	}
+
+	#[inline]
+	fn read_u16(&mut self) -> Result<u16> {
+		S::read_u16(self)
+	}
+
+	#[inline]
+	fn read_u16_le(&mut self) -> Result<u16> {
+		S::read_u16_le(self)
+	}
+
+	#[inline]
+	fn read_i16(&mut self) -> Result<i16> {
+		S::read_i16(self)
+	}
+
+	#[inline]
+	fn read_i16_le(&mut self) -> Result<i16> {
+		S::read_i16_le(self)
+	}
+
+	#[inline]
+	fn read_u32(&mut self) -> Result<u32> {
+		S::read_u32(self)
+	}
+
+	#[inline]
+	fn read_u32_le(&mut self) -> Result<u32> {
+		S::read_u32_le(self)
+	}
+
+	#[inline]
+	fn read_i32(&mut self) -> Result<i32> {
+		S::read_i32(self)
+	}
+
+	#[inline]
+	fn read_i32_le(&mut self) -> Result<i32> {
+		S::read_i32_le(self)
+	}
+
+	#[inline]
+	fn read_u64(&mut self) -> Result<u64> {
+		S::read_u64(self)
+	}
+
+	#[inline]
+	fn read_u64_le(&mut self) -> Result<u64> {
+		S::read_u64_le(self)
+	}
+
+	#[inline]
+	fn read_i64(&mut self) -> Result<i64> {
+		S::read_i64(self)
+	}
+
+	#[inline]
+	fn read_i64_le(&mut self) -> Result<i64> {
+		S::read_i64_le(self)
+	}
+
+	#[inline]
+	fn read_usize(&mut self) -> Result<usize> {
+		S::read_usize(self)
+	}
+
+	#[inline]
+	fn read_usize_le(&mut self) -> Result<usize> {
+		S::read_usize_le(self)
+	}
+
+	#[inline]
+	fn read_isize(&mut self) -> Result<isize> {
+		S::read_isize(self)
+	}
+
+	#[inline]
+	fn read_isize_le(&mut self) -> Result<isize> {
+		S::read_isize_le(self)
+	}
+
+	#[inline]
+	fn read_u128(&mut self) -> Result<u128> {
+		S::read_u128(self)
+	}
+
+	#[inline]
+	fn read_u128_le(&mut self) -> Result<u128> {
+		S::read_u128_le(self)
+	}
+
+	#[inline]
+	fn read_i128(&mut self) -> Result<i128> {
+		S::read_i128(self)
+	}
+
+	#[inline]
+	fn read_i128_le(&mut self) -> Result<i128> {
+		S::read_i128_le(self)
+	}
+
+	#[inline]
+	fn read_int<T: PrimInt + bytemuck::Pod>(&mut self) -> Result<T> {
+		S::read_int(self)
+	}
+
+	#[inline]
+	fn read_int_le<T: PrimInt + bytemuck::Pod>(&mut self) -> Result<T> {
+		S::read_int_le(self)
+	}
+
+	#[inline]
+	fn read_pod<T: bytemuck::Pod>(&mut self) -> Result<T> {
+		S::read_pod(self)
+	}
+
+	#[inline]
+	fn read_utf8(&mut self, buf: &mut String, count: usize) -> Result<usize> {
+		S::read_utf8(self, buf, count)
+	}
+
+	#[inline]
+	fn read_utf8_to_end(&mut self, buf: &mut String) -> Result<usize> {
+		S::read_utf8_to_end(self, buf)
+	}
+
+	#[inline]
+	fn read_utf8_line(&mut self, buf: &mut String) -> Result<Utf8Match> {
+		S::read_utf8_line(self, buf)
+	}
+
+	#[inline]
+	fn read_utf8_line_inclusive(&mut self, buf: &mut String) -> Result<Utf8Match> {
+		S::read_utf8_line_inclusive(self, buf)
+	}
+
+	#[inline]
+	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
+		S::read_utf8_until(self, buf, terminator)
+	}
+
+	#[inline]
+	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
+		S::read_utf8_until_inclusive(self, buf, terminator)
+	}
+}
+
+impl<'d, const N: usize, S: BufSink<'d, N> + ?Sized> BufSink<'d, N> for &mut S {
+	#[inline]
+	fn write(&mut self, source: &mut impl Source<'d, N>, count: usize) -> Result<usize> {
+		S::write(self, source, count)
+	}
+
+	#[inline]
+	fn write_all(&mut self, source: &mut impl Source<'d, N>) -> Result<usize> {
+		S::write_all(self, source)
+	}
+
+	#[inline]
+	fn drain_all_buffered(&mut self) -> BufferResult {
+		S::drain_buffered(self)
+	}
+
+	#[inline]
+	fn drain_buffered(&mut self) -> BufferResult {
+		S::drain_all_buffered(self)
+	}
+
+	#[inline]
+	fn write_from_slice(&mut self, buf: &[u8]) -> Result<usize> {
+		S::write_from_slice(self, buf)
+	}
+
+	#[inline]
+	fn write_u8(&mut self, value: u8) -> Result {
+		S::write_u8(self, value)
+	}
+
+	#[inline]
+	fn write_i8(&mut self, value: i8) -> Result {
+		S::write_i8(self, value)
+	}
+
+	#[inline]
+	fn write_u16(&mut self, value: u16) -> Result {
+		S::write_u16(self, value)
+	}
+
+	#[inline]
+	fn write_u16_le(&mut self, value: u16) -> Result {
+		S::write_u16_le(self, value)
+	}
+
+	#[inline]
+	fn write_i16(&mut self, value: i16) -> Result {
+		S::write_i16(self, value)
+	}
+
+	#[inline]
+	fn write_i16_le(&mut self, value: i16) -> Result {
+		S::write_i16_le(self, value)
+	}
+
+	#[inline]
+	fn write_u32(&mut self, value: u32) -> Result {
+		S::write_u32(self, value)
+	}
+
+	#[inline]
+	fn write_u32_le(&mut self, value: u32) -> Result {
+		S::write_u32_le(self, value)
+	}
+
+	#[inline]
+	fn write_i32(&mut self, value: i32) -> Result {
+		S::write_i32(self, value)
+	}
+
+	#[inline]
+	fn write_i32_le(&mut self, value: i32) -> Result {
+		S::write_i32_le(self, value)
+	}
+
+	#[inline]
+	fn write_u64(&mut self, value: u64) -> Result {
+		S::write_u64(self, value)
+	}
+
+	#[inline]
+	fn write_u64_le(&mut self, value: u64) -> Result {
+		S::write_u64_le(self, value)
+	}
+
+	#[inline]
+	fn write_i64(&mut self, value: i64) -> Result {
+		S::write_i64(self, value)
+	}
+
+	#[inline]
+	fn write_i64_le(&mut self, value: i64) -> Result {
+		S::write_i64_le(self, value)
+	}
+
+	#[inline]
+	fn write_usize(&mut self, value: usize) -> Result {
+		S::write_usize(self, value)
+	}
+
+	#[inline]
+	fn write_usize_le(&mut self, value: usize) -> Result {
+		S::write_usize_le(self, value)
+	}
+
+	#[inline]
+	fn write_isize(&mut self, value: isize) -> Result {
+		S::write_isize(self, value)
+	}
+
+	#[inline]
+	fn write_isize_le(&mut self, value: isize) -> Result {
+		S::write_isize_le(self, value)
+	}
+
+	#[inline]
+	fn write_u128(&mut self, value: u128) -> Result {
+		S::write_u128(self, value)
+	}
+
+	#[inline]
+	fn write_u128_le(&mut self, value: u128) -> Result {
+		S::write_u128_le(self, value)
+	}
+
+	#[inline]
+	fn write_i128(&mut self, value: i128) -> Result {
+		S::write_i128(self, value)
+	}
+
+	#[inline]
+	fn write_i128_le(&mut self, value: i128) -> Result {
+		S::write_i128_le(self, value)
+	}
+
+	#[inline]
+	fn write_int<T: PrimInt + bytemuck::Pod>(&mut self, value: T) -> Result {
+		S::write_int(self, value)
+	}
+
+	#[inline]
+	fn write_int_le<T: PrimInt + bytemuck::Pod>(&mut self, value: T) -> Result {
+		S::write_int_le(self, value)
+	}
+
+	#[inline]
+	fn write_pod<T: bytemuck::Pod>(&mut self, value: T) -> Result {
+		S::write_pod(self, value)
+	}
+
+	#[inline]
+	fn write_utf8(&mut self, value: &str) -> Result<usize> {
+		S::write_utf8(self, value)
+	}
+}

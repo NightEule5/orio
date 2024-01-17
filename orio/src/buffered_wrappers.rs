@@ -170,7 +170,7 @@ impl<'d, S: Source<'d, SIZE> + Seekable, P: Pool<SIZE>> BufferedSource<'d, S, P>
 	}
 
 	fn seek_forward(&mut self, mut off: usize) -> StreamResult<usize> {
-		off -= self.buffer.skip(off)?;
+		off -= self.buffer.skip(off);
 		self.source.seek_forward(off)
 	}
 }
@@ -198,7 +198,7 @@ impl<'d, S: Source<'d, SIZE> + Seekable, P: Pool<SIZE>> Seekable for BufferedSou
 			_ => {
 				// No clever way to do the rest, just invalidate the buffered data
 				// and seek on the source.
-				self.buffer.clear()?;
+				self.buffer.clear();
 				self.source.seek(offset)
 			}
 		}

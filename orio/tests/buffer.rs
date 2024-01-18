@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(round_char_boundary)]
-
 mod dataset;
 
 macro_rules! qc_assert_ok {

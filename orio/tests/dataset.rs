@@ -8,6 +8,8 @@ use orio::streams::{Source, Stream};
 pub struct Data<'a> {
 	/// The name of the data file.
 	pub name: &'a str,
+	/// The path of the data file.
+	pub path: &'a str,
 	/// The size of the data file.
 	pub size: usize,
 	/// The text contents of the data file.
@@ -23,10 +25,20 @@ pub struct Dataset<'a> {
 	pub e_coli: Data<'a>,
 }
 
+macro_rules! data_path {
+    ($prefix:literal$group:literal/$name:literal) => {
+		concat!($prefix, "test-data/", $group, "/", $name)
+	};
+	($group:literal/$name:literal) => {
+		data_path!("" $group/$name)
+	}
+}
+
 macro_rules! data {
     ($group:literal/$name:literal, $hash:literal) => {{
-		let text = include_str!(concat!("../../test-data/", $group, "/", $name));
+		let text = include_str!(data_path!("../../" $group/$name));
 		Data {
+			path: data_path!($group/$name),
 			name: $name,
 			size: text.len(),
 			text,
@@ -56,11 +68,25 @@ impl<'d> Source<'d, SIZE> for Data<'d> {
 	}
 
 	fn fill(&mut self, sink: &mut Buffer<'d, SIZE, impl Pool<SIZE>>, count: usize) -> BufferResult<usize> {
-		let mut len = count.min(self.text.len());
-		len = self.text.floor_char_boundary(len);
-		sink.push_utf8(&self.text[..len]);
-		self.text = &self.text[len..];
-		Ok(len)
+		let mut pushed = 0;
+		for mut chunk in self.text
+						 .as_bytes()
+						 .chunks(SIZE) {
+			if pushed >= count {
+				break
+			}
+
+			let remaining = count - pushed;
+			if chunk.len() > remaining {
+				chunk = &chunk[..remaining];
+			}
+
+			sink.push_slice(chunk);
+			pushed += chunk.len();
+		}
+
+		self.text = &self.text[pushed..];
+		Ok(pushed)
 	}
 
 	fn fill_all(&mut self, sink: &mut Buffer<'d, SIZE, impl Pool<SIZE>>) -> BufferResult<usize> {
@@ -68,7 +94,6 @@ impl<'d> Source<'d, SIZE> for Data<'d> {
 			sink.push_slice(chunk);
 		}
 		let len = self.text.len();
-		sink.push_utf8(self.text);
 		self.text = "";
 		Ok(len)
 	}

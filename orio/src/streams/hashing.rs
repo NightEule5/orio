@@ -262,20 +262,16 @@ impl<'d, H: Clone + Default + Digest, S: BufSource<'d, N>, const N: usize> BufSo
 		Ok(count)
 	}
 
-	fn read_utf8(&mut self, buf: &mut String, count: usize) -> Result<usize> {
-		let start = buf.len();
-		let count = self.source_mut().read_utf8(buf, count)?;
-		let range = start..start + count.min(buf.len());
-		self.hasher.update(&buf[range]);
-		Ok(count)
+	fn read_utf8<'s>(&mut self, buf: &'s mut String, count: usize) -> Result<&'s str> {
+		let str = self.source_mut().read_utf8(buf, count)?;
+		self.hasher.update(str);
+		Ok(str)
 	}
 
-	fn read_utf8_to_end(&mut self, buf: &mut String) -> Result<usize> {
-		let start = buf.len();
-		let count = self.source_mut().read_utf8_to_end(buf)?;
-		let range = start..start + count.min(buf.len());
-		self.hasher.update(&buf[range]);
-		Ok(count)
+	fn read_utf8_to_end<'s>(&mut self, buf: &'s mut String) -> Result<&'s str> {
+		let str = self.source_mut().read_utf8_to_end(buf)?;
+		self.hasher.update(str);
+		Ok(str)
 	}
 
 	fn read_utf8_line(&mut self, buf: &mut String) -> Result<Utf8Match> {

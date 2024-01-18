@@ -8,7 +8,7 @@ use std::mem::MaybeUninit;
 use std::ops::RangeTo;
 use crate::{Buffer, BufferResult, ResultContext, Seg, StreamResult as Result};
 use crate::BufferContext::{Drain, Fill};
-use crate::streams::{BufSink, BufSource, Sink};
+use crate::streams::{BufSink, Sink, Source};
 use crate::pool::Pool;
 use crate::segment::RBuf;
 use crate::StreamContext::Write;
@@ -45,11 +45,11 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 
 impl<'d, const N: usize, P: Pool<N>> Sink<'d, N> for Buffer<'d, N, P> {
 	fn drain(&mut self, source: &mut Buffer<'d, N, impl Pool<N>>, count: usize) -> BufferResult<usize> {
-		source.read(self, count).context(Drain)
+		source.fill(self, count).context(Drain)
 	}
 
 	fn drain_all(&mut self, source: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
-		source.read_all(self).context(Drain)
+		source.fill_all(self).context(Drain)
 	}
 }
 

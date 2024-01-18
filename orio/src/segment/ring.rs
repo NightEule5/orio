@@ -21,9 +21,9 @@ pub(crate) struct RBuf<T> {
 	count: usize,
 }
 
-pub struct BackMut<'a, 'b, const N: usize> {
+pub struct SlotMut<'a, 'b, const N: usize> {
 	ring: NonNull<RBuf<Seg<'a, N>>>,
-	back: &'b mut Seg<'a, N>,
+	seg: &'b mut Seg<'a, N>,
 	start_len: usize,
 	_lifetime_b: PhantomData<&'b Seg<'a, N>>
 }
@@ -62,23 +62,23 @@ impl<T> RBuf<T> {
 	}
 }
 
-impl<'a: 'b, 'b, const N: usize> Deref for BackMut<'a, 'b, N> {
+impl<'a: 'b, 'b, const N: usize> Deref for SlotMut<'a, 'b, N> {
 	type Target = Seg<'a, N>;
 
 	fn deref(&self) -> &Self::Target {
-		self.back
+		self.seg
 	}
 }
 
-impl<'a: 'b, 'b, const N: usize> DerefMut for BackMut<'a, 'b, N> {
+impl<'a: 'b, 'b, const N: usize> DerefMut for SlotMut<'a, 'b, N> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.back
+		self.seg
 	}
 }
 
-impl<'a: 'b, 'b, const N: usize> Drop for BackMut<'a, 'b, N> {
+impl<'a: 'b, 'b, const N: usize> Drop for SlotMut<'a, 'b, N> {
 	fn drop(&mut self) {
-		let Self { ring, back, start_len, .. } = self;
+		let Self { ring, seg: back, start_len, .. } = self;
 		let is_empty = *start_len == 0;
 		match back.len().cmp(start_len) {
 			Ordering::Less => {
@@ -141,15 +141,32 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 		Some(&self.buf[self.back_index()?])
 	}
 
+	/// Returns a drop-guarded mutable reference to the front segment.
+	pub fn front_mut(&mut self) -> Option<SlotMut<'a, '_, N>> {
+		let ring = self.into();
+		self.buf
+			.front_mut()
+			.filter(|seg| seg.is_not_empty())
+			.map(|seg| {
+				let start_len = seg.len();
+				SlotMut {
+					ring,
+					seg,
+					start_len,
+					_lifetime_b: PhantomData
+				}
+			})
+	}
+
 	/// Returns a drop-guarded mutable reference to the back segment.
-	pub fn back_mut(&mut self) -> Option<BackMut<'a, '_, N>> {
+	pub fn back_mut(&mut self) -> Option<SlotMut<'a, '_, N>> {
 		self.back_index().map(|i| {
 			let ring = self.into();
 			let back = &mut self.buf[i];
 			let start_len = back.len();
-			BackMut {
+			SlotMut {
 				ring,
-				back,
+				seg: back,
 				start_len,
 				_lifetime_b: PhantomData
 			}
@@ -157,8 +174,9 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	}
 
 	/// Pushes `seg` to the front of the buffer.
+	#[allow(unused)]
 	pub fn push_front(&mut self, seg: Seg<'a, N>) {
-		if self.is_empty() {
+		if seg.is_empty() {
 			self.push_empty(seg);
 			return;
 		}
@@ -233,13 +251,12 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			self.len = 0;
 			self.count = 0;
 		} else {
-			let count =
+			self.count -=
 				self.buf
 					.iter()
 					.take(count)
-					.map(Seg::limit)
+					.map(Seg::len)
 					.sum::<usize>();
-			self.count -= count;
 
 			if count <= self.len {
 				self.len -= count;
@@ -432,7 +449,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Sets the tracked count.
 	pub unsafe fn set_count(&mut self, count: usize) {
 		debug_assert_eq!(
-			self.count,
+			count,
 			self.iter().map(Seg::len).sum()
 		);
 		self.count = count;

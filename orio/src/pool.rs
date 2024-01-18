@@ -9,7 +9,6 @@ use std::mem::MaybeUninit;
 use std::ops::{DerefMut, Range};
 use std::rc::Rc;
 use std::result;
-use itertools::Itertools;
 use once_cell::sync::Lazy;
 use super::segment::{alloc_block, Block, Seg, SIZE};
 
@@ -181,11 +180,11 @@ impl MutPool for DefaultPool {
 			let Self(vec) = self;
 			let existing_count = count.min(vec.len());
 			let allocate_count = count - existing_count;
+			self.0.extend(Self::allocate(allocate_count));
 			target.extend(
 				self.0
-					.drain(..existing_count)
-					.chain(Self::allocate(allocate_count))
-					.map_into()
+					.drain(..count)
+					.map(Into::into)
 			);
 		}
 	}

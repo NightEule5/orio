@@ -7,7 +7,7 @@ use crate::BufferContext::{Drain, Fill};
 use crate::pattern::{LineTerminator, Pattern};
 use crate::pool::Pool;
 use crate::segment::SliceRangeIter;
-use crate::streams::{BufSource, Source, Utf8Match};
+use crate::streams::{BufSink, BufSource, Source, Utf8Match};
 use crate::StreamContext::Read;
 use super::read_partial_utf8_into;
 
@@ -24,40 +24,36 @@ impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 			return self.fill_all(sink)
 		}
 
-		let mut remaining = count;
-		let partial_pos = self.data.iter().position(|seg|
-			if seg.len() > remaining && remaining > sink.share_threshold {
+		let mut moved = 0;
+		let full_count = self.data.iter().position(|seg| {
+			let remaining = count - moved;
+			if seg.len() > remaining {
 				true
 			} else {
-				remaining -= seg.len();
+				moved += seg.len();
 				false
 			}
-		).unwrap();
-
-		sink.reserve(remaining).set_context(Fill)?;
+		}).unwrap();
 
 		sink.data.extend(
-			self.data
-				.drain(partial_pos)
+			self.data.drain(full_count)
 		);
 
-		if let Some(mut seg) = self.data.pop_front() {
-			let mut shared = seg.share(..remaining);
-			// Share partial segment with sink
-			let partial = if remaining >= sink.share_threshold {
-				shared
+		if moved < count {
+			let remaining = count - moved;
+			let mut front = self.data
+							   .front_mut()
+							   .expect("should have one remaining segment");
+			if remaining >= sink.share_threshold {
+				let shared = front.share(..remaining);
+				sink.data.push_back(shared);
 			} else {
-				let mut fresh = sink.data.pop_back().expect(
-					"buffer should have writable segments after reserve"
-				);
-				fresh.write_from(&mut shared)
-					 .expect("back segment should be writable");
-				fresh
-			};
+				let (a, b) = front.as_slices_in_range(..remaining);
+				sink.write_from_slice(a).context(Fill)?;
+				sink.write_from_slice(b).context(Fill)?;
+			}
 
-			seg.consume(remaining);
-			self.data.push_front(seg);
-			sink.data.push_back(partial);
+			front.consume(remaining);
 		}
 
 		self.resize().set_context(Fill)?;
@@ -66,11 +62,20 @@ impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 
 	fn fill_all(&mut self, sink: &mut Buffer<'d, N, impl Pool<N>>) -> BufferResult<usize> {
 		self.resize().set_context(Fill)?;
-		let read = self.count();
-		// Take the internal ring buffer instead of draining, which should be
-		// significantly faster; similar to Buffer::clear.
-		sink.data.extend(self.take_buf());
-		Ok(read)
+		let count = self.count();
+		if count == 0 { return Ok(0) }
+
+		if self.data.len() == 1 {
+			let seg = self.data.pop_front().unwrap();
+			let len = seg.len();
+			sink.data.push_back(seg);
+			Ok(len)
+		} else {
+			// Take the internal ring buffer instead of draining, which should be
+			// significantly faster; similar to Buffer::clear.
+			sink.data.extend(self.take_buf());
+			Ok(count)
+		}
 	}
 }
 
@@ -106,18 +111,20 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		Ok(count)
 	}
 
-	fn read_utf8(&mut self, buf: &mut String, mut count: usize) -> Result<usize> {
+	fn read_utf8<'s>(&mut self, buf: &'s mut String, mut count: usize) -> Result<&'s str> {
+		let len = buf.len();
 		count = count.min(self.count());
 		buf.reserve(count);
 		let read = read_partial_utf8_into(
 			self.data.iter_slices_in_range(..count),
 			buf
 		).context(Read)?;
-		Ok(self.skip(read))
+		self.skip(read);
+		Ok(&buf[len..])
 	}
 
 	#[inline]
-	fn read_utf8_to_end(&mut self, buf: &mut String) -> Result<usize> {
+	fn read_utf8_to_end<'s>(&mut self, buf: &'s mut String) -> Result<&'s str> {
 		self.read_utf8(buf, self.count())
 	}
 
@@ -136,12 +143,12 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 	/// occurs, no data is consumed and `buf` will contain the last valid data.
 	fn read_utf8_until(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		if let Some(range) = self.find(terminator) {
-			let count = self.read_utf8(buf, range.start)?;
+			let count = self.read_utf8(buf, range.start)?.len();
 			self.skip(range.len());
 			Ok((count, true).into())
 		} else {
 			self.read_utf8_to_end(buf)
-				.map(|count| (count, false).into())
+				.map(|str| (str.len(), false).into())
 		}
 	}
 
@@ -152,10 +159,10 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		if let Some(range) = self.find(terminator) {
 			self.read_utf8(buf, range.end)
-				.map(|count| (count, true).into())
+				.map(|str| (str.len(), true).into())
 		} else {
 			self.read_utf8_to_end(buf)
-				.map(|count| (count, false).into())
+				.map(|str| (str.len(), false).into())
 		}
 	}
 }

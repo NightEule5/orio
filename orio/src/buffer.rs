@@ -319,12 +319,12 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 				Ok(())
 			}
 			Allocate::OnError => {
-				if let Err(_) = pool.claim_size(data, count) {
+				if let Err(_) = pool.claim_count(data, seg_count) {
 					data.allocate(seg_count);
 				}
 				Ok(())
 			}
-			Allocate::Never => pool.claim_size(data, count).context(Reserve)
+			Allocate::Never => pool.claim_count(data, seg_count).context(Reserve)
 		}
 	}
 
@@ -378,7 +378,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 
 	/// Skips up to `count` bytes.
 	pub fn skip(&mut self, count: usize) -> usize {
-		if count >= self.count() {
+		if count == self.count() {
 			self.clear();
 			return count
 		}

@@ -196,8 +196,8 @@ pub trait SinkExt<'d, const N: usize, P: Pool<N>>: Sink<'d, N> + Sized {
 	fn buffered(self) -> Self::Buffered;
 }
 
-impl<'d, S: Sink<'d, SIZE>, P: Pool<SIZE>> SinkExt<'d, SIZE, P> for S {
-	type Buffered = BufferedSink<'d, Self, P>;
+impl<'d, S: Sink<'d, SIZE>> SinkExt<'d, SIZE, DefaultPoolContainer> for S {
+	type Buffered = BufferedSink<'d, Self, DefaultPoolContainer>;
 
 	fn buffered(self) -> Self::Buffered {
 		BufferedSink::new(self, Buffer::default())
@@ -437,19 +437,22 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 		Ok(buf)
 	}
 
-	/// Reads up to `count` UTF-8 bytes into `buf`, returning the number of bytes
-	/// read. If a decode error occurs, no data is consumed and `buf` will contain
-	/// the last valid data.
-	fn read_utf8(&mut self, buf: &mut String, count: usize) -> Result<usize> {
-		self.read_count_spec(count, |src, count| src.read_utf8(buf, count))
+	/// Reads up to `count` UTF-8 bytes into `buf`, returning a slice of `buf`
+	/// containing the read data. If a decode error occurs, no data is consumed and
+	/// `buf` will contain the last valid data.
+	fn read_utf8<'s>(&mut self, buf: &'s mut String, count: usize) -> Result<&'s str> {
+		let len = buf.len();
+		self.read_count_spec(count, |src, count| src.read_utf8(buf, count).map(str::len))?;
+		Ok(&buf[len..])
 	}
 
-	/// Reads UTF-8 bytes into `buf` until end-of-stream, returning the number of
-	/// bytes read. If a decode error occurs, no data is consumed and `buf` will
-	/// contain the last valid data.
-	fn read_utf8_to_end(&mut self, buf: &mut String) -> Result<usize> {
-		self.read_spec(|src| src.read_utf8_to_end(buf).map(|n| (n, false)))
-			.map(|(n, _)| n)
+	/// Reads UTF-8 bytes into `buf` until end-of-stream, returning a slice of `buf`
+	/// containing the read data. If a decode error occurs, no data is consumed and
+	/// `buf` will contain the last valid data.
+	fn read_utf8_to_end<'s>(&mut self, buf: &'s mut String) -> Result<&'s str> {
+		let len = buf.len();
+		self.read_spec(|src| src.read_utf8_to_end(buf).map(|s| (s.len(), false)))?;
+		Ok(&buf[len..])
 	}
 
 	/// Reads UTF-8 bytes into `buf` until a line terminator, returning the number
@@ -977,12 +980,12 @@ impl<'d, const N: usize, S: BufSource<'d, N> + ?Sized> BufSource<'d, N> for &mut
 	}
 
 	#[inline]
-	fn read_utf8(&mut self, buf: &mut String, count: usize) -> Result<usize> {
+	fn read_utf8<'s>(&mut self, buf: &'s mut String, count: usize) -> Result<&'s str> {
 		S::read_utf8(self, buf, count)
 	}
 
 	#[inline]
-	fn read_utf8_to_end(&mut self, buf: &mut String) -> Result<usize> {
+	fn read_utf8_to_end<'s>(&mut self, buf: &'s mut String) -> Result<&'s str> {
 		S::read_utf8_to_end(self, buf)
 	}
 

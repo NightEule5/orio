@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(round_char_boundary)]
 #![cfg(feature = "sha2")]
 
 mod dataset;

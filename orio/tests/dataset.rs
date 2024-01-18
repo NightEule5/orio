@@ -48,7 +48,7 @@ macro_rules! data {
 }
 
 pub const DATASET: Dataset = Dataset {
-	fields_c: data!("cantrbry"/"fields.c", "85d73e354cc50cec76cb5a50537cf8dc035f8cbb8480f9e1cbe2f7d6c23393c7"),
+	fields_c: data!("cantrbry"/"fields_c", "85d73e354cc50cec76cb5a50537cf8dc035f8cbb8480f9e1cbe2f7d6c23393c7"),
 	e_coli: data!("large"/"E.coli", "9125dfd87315961ef4286f3856098069e050cc3a2abe65735fe43e69d1996f40"),
 };
 

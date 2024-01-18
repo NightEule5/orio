@@ -423,7 +423,7 @@ impl<const LEN: usize> Arbitrary for Span<LEN> {
 	}
 }
 
-/// Test reading random spans of up to 32 bytes from fields.c.
+/// Test reading random spans of up to 32 bytes from fields_c.
 #[quickcheck]
 fn corpus(Span { offset, length }: Span<{DATASET.fields_c.size}>) -> TestResult {
 	let source = &DATASET.fields_c.text[offset..][..length];

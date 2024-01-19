@@ -78,8 +78,7 @@ impl<'d, const N: usize, P: Pool<N>> BufSink<'d, N> for Buffer<'d, N, P> {
 /// Iterates over writable segments in a buffer, returning mutable slices of their
 /// spare capacity.
 struct SpareCapacityIter<'a: 'b, 'b, const N: usize> {
-	seg_count: usize,
-	rem_count: usize,
+	count: usize,
 	seg_iter: vec_deque::IterMut<'b, Seg<'a, N>>,
 	last_slice: Option<&'b mut [MaybeUninit<u8>]>,
 }
@@ -89,46 +88,39 @@ impl<'a: 'b, 'b, const N: usize> Iterator for SpareCapacityIter<'a, 'b, N> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		let mut slice = self.last_slice.take().or_else(|| {
-			let (a, b) = self.seg_iter.next()?.spare_capacity_mut();
-			self.seg_count -= 1;
-			self.last_slice = Some(b);
+			if self.count == 0 {
+				return None
+			}
+
+			let (a, b) = self.seg_iter.find(|seg|
+				!seg.is_full()
+			)?.spare_capacity_mut();
+			self.last_slice = Some(b).filter(|b| !b.is_empty());
 			Some(a)
 		})?;
 
-		if self.seg_count == 0 {
-			let len = self.rem_count.min(slice.len());
-			slice = &mut slice[..len];
-			self.rem_count -= len;
+		if slice.len() < self.count {
+			self.count -= slice.len();
+		} else {
+			slice = &mut slice[..self.count];
+			self.count = 0;
 		}
 		Some(slice)
-	}
-
-	fn size_hint(&self) -> (usize, Option<usize>) {
-		let len = self.len();
-		(len, Some(len))
-	}
-}
-
-impl<'a: 'b, 'b, const N: usize> ExactSizeIterator for SpareCapacityIter<'a, 'b, N> {
-	fn len(&self) -> usize {
-		let len = self.seg_iter.len() * 2;
-		if self.last_slice.is_some() {
-			len + 1
-		} else {
-			len
-		}
 	}
 }
 
 impl<'a: 'b, 'b, const N: usize> SpareCapacityIter<'a, 'b, N> {
 	fn collect_io_slices(self) -> Vec<IoSliceMut<'b>> {
-		self.map(|slice|
+		let mut vec = Vec::with_capacity(self.seg_iter.len() * 2);
+		vec.extend(
+			self.map(|slice|
 				IoSliceMut::new(unsafe {
 					// Safety: IO slices are only written to, never read.
 					MaybeUninit::slice_assume_init_mut(slice)
 				})
 			)
-			.collect()
+		);
+		vec
 	}
 
 	fn map_into_bufs(self) -> FilterMap<Self, fn(&'b mut [MaybeUninit<u8>]) -> Option<BorrowedBuf<'b>>> {
@@ -141,11 +133,9 @@ impl<'a, const N: usize, P: Pool<N>> Buffer<'a, N, P> {
 		&mut self,
 		RangeTo { end }: RangeTo<usize>
 	) -> SpareCapacityIter<'a, '_, N> {
-		let (seg_count, rem_count) = self.data.count_writable(end);
 		SpareCapacityIter {
-			seg_count,
-			rem_count,
-			seg_iter: self.data.iter_writable(seg_count),
+			count: end,
+			seg_iter: self.data.iter_all_writable(),
 			last_slice: None,
 		}
 	}
@@ -163,15 +153,19 @@ impl<'a, const N: usize, P: Pool<N>> Buffer<'a, N, P> {
 			return Ok(0)
 		}
 
-		let mut read = self.fill_spare_from_reader(reader, count, allow_vectored)?;
-		if read >= count || read == 0 {
-			return Ok(read)
+		let mut read = 0;
+		if self.capacity() > 0 {
+			read = self.fill_spare_from_reader(reader, count, allow_vectored)?;
+			if read >= count || read == 0 {
+				return Ok(read)
+			}
 		}
 
 		// Read in block-sized chunks until count is reached, an error occurs, or
 		// the reader stops reading any more bytes.
-		let mut cur_read = 0;
+		let mut cur_read;
 		while read < count {
+			cur_read = 0;
 			let remaining = count - read;
 			if self.reserve(remaining.min(N)).is_err() {
 				break
@@ -204,9 +198,10 @@ impl<'a, const N: usize, P: Pool<N>> Buffer<'a, N, P> {
 		let spare = self.spare_capacity(..count);
 		let mut read = 0;
 		let result = if allow_vectored && reader.is_read_vectored() {
+			let mut spare = spare.collect_io_slices();
 			// Todo: benchmark to determine whether the overhead of allocating a
 			//  vector outweighs the speedup of vectored reads.
-			reader.read_vectored(&mut spare.collect_io_slices())
+			reader.read_vectored(&mut spare)
 				  .map(|cur_read| read += cur_read)
 		} else {
 			try {

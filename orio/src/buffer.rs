@@ -12,7 +12,7 @@ use std::fmt::{Debug, Formatter};
 use std::ops::{Range, RangeBounds};
 use all_asserts::assert_ge;
 use itertools::Itertools;
-use crate::pool::{DefaultPoolContainer, Pool, pool, PoolExt};
+use crate::pool::{DefaultPoolContainer, Pool, pool, PoolError, PoolExt};
 use crate::{BufferResult as Result, ByteStr, ResultContext, ResultSetContext, Seg, StreamResult};
 use crate::BufferContext::{Copy, Reserve, Resize};
 use crate::pattern::Pattern;
@@ -193,6 +193,13 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		}
 	}
 
+	/// Creates a new buffer with capacity reserved for at least `capacity` bytes.
+	pub fn with_capacity(capacity: usize) -> Self {
+		let mut new = Self::default();
+		new.claim_or_alloc(capacity);
+		new
+	}
+
 	/// Creates a new buffer with `data` as its internal ring buffer.
 	fn new_buf(
 		pool: P,
@@ -225,6 +232,8 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	pub fn limit(&self) -> usize { self.data.limit() }
 	/// Returns the number of bytes in the buffer.
 	pub fn count(&self) -> usize { self.data.count() }
+	/// Returns the total number of bytes that can be written to the buffer.
+	pub fn capacity(&self) -> usize { self.data.byte_capacity() }
 	/// Returns `true` if the buffer is empty.
 	pub fn is_empty(&self) -> bool { self.data.is_empty() }
 	/// Returns `true` if the buffer is not empty.
@@ -319,12 +328,18 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 				Ok(())
 			}
 			Allocate::OnError => {
-				if let Err(_) = pool.claim_count(data, seg_count) {
-					data.allocate(seg_count);
-				}
+				self.claim_or_alloc(count);
 				Ok(())
 			}
 			Allocate::Never => pool.claim_count(data, seg_count).context(Reserve)
+		}
+	}
+
+	fn claim_or_alloc(&mut self, count: usize) {
+		let Self { data, pool, .. } = self;
+		let seg_count = count.div_ceil(N);
+		if let Err(_) = pool.claim_count(data, seg_count) {
+			data.allocate(seg_count);
 		}
 	}
 

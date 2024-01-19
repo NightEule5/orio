@@ -45,6 +45,19 @@ impl<W: Write> From<W> for WriterSink<W> {
 	}
 }
 
+impl<R: Read> ReaderSource<R> {
+	/// Sets whether vectored read operations are allowed.
+	#[inline]
+	pub fn set_allow_vectored(&mut self, value: bool) {
+		self.allow_vectored = value;
+	}
+
+	/// Consumes the source, returning the wrapper reader.
+	pub fn into_inner(mut self) -> Option<R> {
+		self.reader.take()
+	}
+}
+
 impl<const N: usize, R: Read> Stream<N> for ReaderSource<R> {
 	fn is_closed(&self) -> bool {
 		self.reader.is_none()
@@ -69,6 +82,19 @@ impl<'d, const N: usize, R: Read> Source<'d, N> for ReaderSource<R> {
 						 .as_mut()
 						 .ok_or_else(|| Error::closed(Fill))?;
 		sink.fill_from_reader(reader, count, self.allow_vectored)
+	}
+}
+
+impl<W: Write> WriterSink<W> {
+	/// Sets whether vectored write operations are allowed.
+	#[inline]
+	pub fn set_allow_vectored(&mut self, value: bool) {
+		self.allow_vectored = value;
+	}
+
+	/// Consumes the sink, returning the wrapped writer.
+	pub fn into_inner(mut self) -> Option<W> {
+		self.writer.take()
 	}
 }
 

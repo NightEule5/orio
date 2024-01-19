@@ -38,7 +38,7 @@ macro_rules! data {
     ($group:literal/$name:literal, $hash:literal) => {{
 		let text = include_str!(data_path!("../../" $group/$name));
 		Data {
-			path: data_path!($group/$name),
+			path: data_path!("../" $group/$name),
 			name: $name,
 			size: text.len(),
 			text,

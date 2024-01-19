@@ -135,10 +135,14 @@ impl<'d, S: Source<'d, SIZE>, P: Pool<SIZE>> BufSource<'d, SIZE> for BufferedSou
 			return Ok(true)
 		}
 
-		// Fill buffer to its limit
-		source.fill_free(buffer)?;
-		if buffer.count() >= count {
-			return Ok(true)
+		if buffer.capacity() > 0 {
+			// Fill buffer to its limit
+			source.fill_free(buffer)?;
+			if buffer.count() >= count {
+				return Ok(true)
+			}
+		} else {
+			buffer.reserve(SIZE).context(Read)?;
 		}
 
 		while buffer.count() < count && !source.is_eos() {

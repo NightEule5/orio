@@ -119,6 +119,14 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Returns the number of segments in the buffer, counting empty segments.
 	pub fn capacity(&self) -> usize { self.buf.len() }
 
+	/// Returns the total number of bytes that can be written to the buffer.
+	pub fn byte_capacity(&self) -> usize {
+		self.buf
+			.iter()
+			.map(Seg::size)
+			.sum()
+	}
+
 	/// Returns the number of bytes in the buffer.
 	pub fn count(&self) -> usize { self.count }
 
@@ -388,8 +396,13 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			.unwrap_or(self.len)
 	}
 
-	pub fn is_back_writable(&self) -> bool {
-		self.back().is_some_and(|seg| !seg.is_full())
+	pub fn is_back_partial_writable(&self) -> bool {
+		self.back().is_some_and(|seg| !seg.is_full() && !seg.is_empty())
+	}
+
+	pub fn iter_all_writable(&mut self) -> vec_deque::IterMut<Seg<'a, N>> {
+		let start = self.writable_index();
+		self.buf.range_mut(start..)
 	}
 
 	pub fn iter_writable(&mut self, count: usize) -> vec_deque::IterMut<Seg<'a, N>> {
@@ -400,7 +413,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	/// Grows the buffer and its segments by `count` bytes.
 	pub unsafe fn grow(&mut self, count: usize) {
 		let mut seg_count = 0;
-		let is_back_writable = self.is_back_writable();
+		let is_back_writable = self.is_back_partial_writable();
 		let mut counted = 0;
 		for seg in self.buf.range_mut(self.len.saturating_sub(1)..) {
 			if counted == count {

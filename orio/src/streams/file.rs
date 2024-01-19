@@ -52,7 +52,7 @@ impl<const N: usize> Source<'_, N> for FileSource {
 	/// no more bytes will be read, even if more bytes have been written to the
 	/// file after the source was created.
 	fn is_eos(&self) -> bool {
-		self.len.is_some_and(|len| self.read_count < len)
+		self.len.is_some_and(|len| self.read_count >= len)
 	}
 
 	fn fill(&mut self, sink: &mut Buffer<'_, N, impl Pool<N>>, mut count: usize) -> BufferResult<usize> {

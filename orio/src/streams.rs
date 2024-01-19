@@ -2,7 +2,7 @@
 
 use std::result;
 use num_traits::PrimInt;
-use crate::pool::{DefaultPoolContainer, Pool};
+use crate::pool::{DefaultPoolContainer, Pool, PoolError};
 
 mod seeking;
 mod void;
@@ -262,7 +262,7 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 	/// [`request`]: Self::request
 	fn require(&mut self, count: usize) -> Result<()> {
 		self.check_open(Read)?;
-		if count > 0 && (self.is_eos() || !self.request(count)?) {
+		if !self.request(count)? {
 			return Err(StreamError::end_of_stream(count, Read))
 		}
 		Ok(())
@@ -507,15 +507,13 @@ trait BufSourceSpec<'d, const N: usize>: BufSource<'d, N> {
 		mut read: impl FnMut(&mut Buffer<'d, N, <Self as BufStream<'d, N>>::Pool>) -> Result<R>
 	) -> Result<(usize, bool)> {
 		let mut count = 0;
-		loop {
+		while !self.is_eos() || self.available() > 0 {
 			let (read, term) = read(self.buf_mut())?.into();
 			count += read;
-			if term { break Ok((count, term)) }
-			self.request(self.buf().limit())?;
-			if self.is_eos() || self.available() == 0 {
-				break Ok((count, false))
-			}
+			if term { return Ok((count, term)) }
+			self.request(self.buf().limit().max(N))?;
 		}
+		Ok((count, false))
 	}
 
 	fn read_count_spec<E>(

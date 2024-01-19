@@ -51,6 +51,11 @@ impl<R: Read> ReaderSource<R> {
 	pub fn set_allow_vectored(&mut self, value: bool) {
 		self.allow_vectored = value;
 	}
+
+	/// Consumes the source, returning the wrapper reader.
+	pub fn into_inner(mut self) -> Option<R> {
+		self.reader.take()
+	}
 }
 
 impl<const N: usize, R: Read> Stream<N> for ReaderSource<R> {
@@ -85,6 +90,11 @@ impl<W: Write> WriterSink<W> {
 	#[inline]
 	pub fn set_allow_vectored(&mut self, value: bool) {
 		self.allow_vectored = value;
+	}
+
+	/// Consumes the sink, returning the wrapped writer.
+	pub fn into_inner(mut self) -> Option<W> {
+		self.writer.take()
 	}
 }
 

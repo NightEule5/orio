@@ -438,7 +438,7 @@ impl<const N: usize> BlockDeque<N> {
 
 	fn spare_capacity_ranges(&self) -> (Range<usize>, Range<usize>) {
 		let back_idx = self.wrap(self.len);
-		if back_idx > self.head {
+		if back_idx >= self.head {
 			(back_idx..N, 0..self.head)
 		} else {
 			(back_idx..self.head, 0..0)

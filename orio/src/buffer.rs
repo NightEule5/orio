@@ -12,7 +12,7 @@ use std::fmt::{Debug, Formatter};
 use std::ops::{Range, RangeBounds};
 use all_asserts::assert_ge;
 use itertools::Itertools;
-use crate::pool::{DefaultPoolContainer, Pool, pool, PoolError, PoolExt};
+use crate::pool::{DefaultPoolContainer, Pool, pool, PoolExt};
 use crate::{BufferResult as Result, ByteStr, ResultContext, ResultSetContext, Seg, StreamResult};
 use crate::BufferContext::{Copy, Reserve, Resize};
 use crate::pattern::Pattern;
@@ -136,7 +136,7 @@ impl<'d> Buffer<'d> {
 	/// contents.
 	pub fn from_byte_str(value: ByteStr<'d>) -> Self {
 		let mut buf = Self::default();
-		buf.data = value.iter()
+		buf.data = value.slices()
 						.map(Seg::from_slice)
 						.collect::<Vec<_>>()
 						.into();

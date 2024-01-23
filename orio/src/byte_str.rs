@@ -5,14 +5,12 @@ mod encoding;
 mod hash;
 mod iter;
 
-use std::borrow::Cow;
-use std::ops::{Add, AddAssign, Index, Range, RangeBounds};
-use std::{fmt, slice};
-use std::cell::Cell;
+use std::borrow::{Borrow, Cow};
+use std::ops::{Add, AddAssign, Deref, DerefMut, Index, Range, RangeBounds};
+use std::{fmt, mem, slice};
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::iter::once;
-use std::str::from_utf8_unchecked;
 use all_asserts::assert_le;
 use simdutf8::compat::from_utf8;
 use crate::Utf8Error;
@@ -30,12 +28,20 @@ pub struct ByteStr<'a> {
 }
 
 /// An owned string of bytes.
-#[derive(Clone)]
+#[derive(Clone, amplify_derive::From)]
 pub struct ByteString {
 	// Todo: change this to a "valid range", to allow invalid bytes to be pushed but
 	//  still skip the check for valid UTF-8 bytes?
-	is_utf8: Cell<bool>,
-	data: Vec<u8>,
+	#[from]
+	#[from(Vec<u8>)]
+	#[from(String)]
+	data: Data,
+}
+
+#[derive(Clone, amplify_derive::From)]
+enum Data {
+	Bytes(#[from] Vec<u8>),
+	String(#[from] String)
 }
 
 impl<'a> ByteStr<'a> {
@@ -355,7 +361,13 @@ impl<'a> ByteStr<'a> {
 			data.extend_from_slice(slice);
 		}
 
-		ByteString { is_utf8: is_utf8.into(), data }
+		ByteString::from_data(
+			if is_utf8 {
+				Data::from_utf8_unchecked(data)
+			} else {
+				Data::Bytes(data)
+			}
+		)
 	}
 
 	/// Shortens the byte string length to a maximum of `len` bytes.
@@ -594,10 +606,7 @@ impl ByteString {
 	/// Creates an empty byte string.
 	#[inline]
 	pub const fn new() -> Self {
-		Self {
-			is_utf8: Cell::new(true),
-			data: Vec::new(),
-		}
+		Self::from_data(Data::String(String::new()))
 	}
 
 	/// Returns the length in bytes of the byte string.
@@ -625,16 +634,46 @@ impl ByteString {
 		ByteStr::from_slice(data, utf8)
 	}
 
-	/// Returns a string of UTF-8-decoded bytes.
-	pub fn utf8(&self) -> Result<&str, Utf8Error> {
-		if self.is_utf8.get() {
-			// The byte string was created from valid UTF-8, skip the check.
-			Ok(self.utf8_unchecked())
-		} else {
-			let utf8 = from_utf8(&self.data)?;
-			self.is_utf8.set(true);
-			Ok(utf8)
+	/// Decodes the bytes as UTF-8, storing the result and returning the data as a
+	/// string if successful. If the result is `Ok`, subsequent calls skip this
+	/// check.
+	pub fn check_utf8(&mut self) -> Result<&str, Utf8Error> {
+		// ...wat?
+		let Self { data } = self;
+		if let Data::Bytes(bytes) = data {
+			from_utf8(bytes)?;
+			*data = Data::String(
+				unsafe {
+					String::from_utf8_unchecked(mem::take(bytes))
+				}
+			)
 		}
+
+		let Data::String(str) = data else {
+			unsafe {
+				std::hint::unreachable_unchecked()
+			}
+		};
+		Ok(str)
+	}
+
+	/// Decodes the bytes as UTF-8.
+	pub fn utf8(&self) -> Result<&str, Utf8Error> {
+		match &self.data {
+			Data::String(str) => Ok(str),
+			Data::Bytes(bytes) => Ok(from_utf8(bytes)?)
+		}
+	}
+
+	/// Returns the UTF-8 representation of the data checked by [`check_utf8`], or
+	/// `None` if the data has not been checked.
+	///
+	/// [`check_utf8`]: Self::check_utf8
+	pub fn checked_utf8(&self) -> Option<&str> {
+		let Data::String(str) = &self.data else {
+			return None
+		};
+		Some(str)
 	}
 
 	/// Finds the first range matching `pattern` in the byte string.
@@ -714,12 +753,14 @@ impl ByteString {
 	/// The bytes strings will contain valid UTF-8 if the current one is marked as
 	/// valid UTF-8, and the index falls on a character boundary.
 	pub fn split_off(&mut self, at: usize) -> Self {
-		self.set_utf8_split(at);
-		let data = self.data.split_off(at);
-		Self {
-			is_utf8: self.is_utf8.clone(),
-			data
-		}
+		self.check_utf8_split(at);
+		let split = self.data.split_off(at);
+		let data = if matches!(&self.data, Data::String(_)) {
+			Data::from_utf8_unchecked(split)
+		} else {
+			split.into()
+		};
+		Self { data }
 	}
 
 	/// Splits the byte string into a pair of borrowed sequences at the first match
@@ -737,7 +778,6 @@ impl ByteString {
 	/// string.
 	pub fn replace(&self, from: impl Pattern, to: &[u8]) -> Self {
 		use simdutf8::basic::from_utf8;
-		let is_utf8 = self.is_utf8.get() && from_utf8(to).is_ok();
 		let mut data = Vec::with_capacity(self.len());
 		let mut last = 0;
 		for Range { start, end } in self.matches(from) {
@@ -747,19 +787,19 @@ impl ByteString {
 		}
 
 		data.extend_from_slice(&self.data[last..]);
-
-		Self { is_utf8: is_utf8.into(), data }
+		Data::new(data, self.data.is_utf8() && from_utf8(to).is_ok())
+			.into()
 	}
 
 	/// Shortens the byte string length to a maximum of `len` bytes.
 	pub fn truncate(&mut self, len: usize) {
-		self.set_utf8_split(len);
+		self.check_utf8_split(len);
 		self.data.truncate(len);
 	}
 
 	/// Appends `slice` to the byte string.
 	pub fn extend_from_slice(&mut self, slice: &[u8]) {
-		self.set_utf8(false);
+		self.unmark_utf8();
 		self.data.extend_from_slice(slice);
 	}
 
@@ -776,7 +816,12 @@ impl ByteString {
 	/// Returns the internal data as a slice of bytes.
 	pub fn as_slice(&self) -> &[u8] { self.data.as_slice() }
 	/// Returns the internal data.
-	pub fn into_bytes(self) -> Vec<u8> { self.data }
+	pub fn into_bytes(self) -> Vec<u8> {
+		match self.data {
+			Data::Bytes(bytes) => bytes,
+			Data::String(utf8) => utf8.into_bytes()
+		}
+	}
 	/// Returns the internal data as a UTF-8 string.
 	pub fn into_utf8(self) -> Result<String, Utf8Error> {
 		self.utf8()?;
@@ -784,34 +829,106 @@ impl ByteString {
 	}
 }
 
+impl Borrow<[u8]> for Data {
+	#[inline]
+	fn borrow(&self) -> &[u8] {
+		match self {
+			Self::Bytes(vec) => vec,
+			Self::String(str) => str.as_bytes()
+		}
+	}
+}
+
+impl AsRef<[u8]> for Data {
+	#[inline]
+	fn as_ref(&self) -> &[u8] {
+		self
+	}
+}
+
+impl Deref for Data {
+	type Target = Vec<u8>;
+
+	#[inline]
+	fn deref(&self) -> &Vec<u8> {
+		match self {
+			Self::Bytes(vec) => vec,
+			Self::String(str) => unsafe {
+				// Safety: String and Vec<u8> have the same memory layout.
+				mem::transmute(str)
+			}
+		}
+	}
+}
+
+impl DerefMut for Data {
+	#[inline]
+	fn deref_mut(&mut self) -> &mut Vec<u8> {
+		match self {
+			Self::Bytes(vec) => vec,
+			Self::String(str) => unsafe {
+				// Safety: data is checked before mutating the string.
+				str.as_mut_vec()
+			}
+		}
+	}
+}
+
+impl Data {
+	fn new(data: Vec<u8>, is_utf8: bool) -> Self {
+		if is_utf8 {
+			Self::from_utf8_unchecked(data)
+		} else {
+			data.into()
+		}
+	}
+
+	fn from_utf8_unchecked(data: Vec<u8>) -> Self {
+		unsafe {
+			Self::String(String::from_utf8_unchecked(data))
+		}
+	}
+
+	fn is_utf8(&self) -> bool {
+		matches!(self, Self::String(_))
+	}
+
+	fn unmark_utf8(&mut self) {
+		*self = self.take_bytes().into();
+	}
+
+	fn take_bytes(&mut self) -> Vec<u8> {
+		match self {
+			Self::Bytes(bytes) => mem::take(bytes),
+			Self::String(str) => mem::take(str).into_bytes()
+		}
+	}
+}
+
 impl ByteString {
-	fn checked_utf8(&self) -> Option<&str> {
-		self.is_utf8
-			.get()
-			.then(|| self.utf8_unchecked())
+	#[inline]
+	const fn from_data(data: Data) -> Self {
+		Self { data }
 	}
 
 	fn into_utf8_unchecked(self) -> String {
-		unsafe {
-			String::from_utf8_unchecked(self.data)
+		match self.data {
+			Data::Bytes(bytes) => unsafe {
+				String::from_utf8_unchecked(bytes)
+			},
+			Data::String(utf8) => utf8
 		}
 	}
 
-	fn utf8_unchecked(&self) -> &str {
-		unsafe {
-			from_utf8_unchecked(&self.data)
+	fn check_utf8_split(&mut self, idx: usize) {
+		match &self.data {
+			Data::String(str) if !str.is_char_boundary(idx) => self.unmark_utf8(),
+			_ => { }
 		}
 	}
 
-	fn set_utf8_split(&mut self, idx: usize) {
-		self.set_utf8(
-			self.checked_utf8()
-				.is_some_and(|str| str.is_char_boundary(idx))
-		);
-	}
-
-	fn set_utf8(&mut self, value: bool) {
-		*self.is_utf8.get_mut() = value;
+	fn unmark_utf8(&mut self) {
+		self.data.unmark_utf8();
 	}
 }
 
@@ -825,11 +942,10 @@ impl Default for ByteString {
 impl fmt::Debug for ByteString {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		let mut repr = f.debug_struct("ByteString");
-		if let Some(utf8) = self.checked_utf8() {
-			repr.field("data", &utf8);
-		} else {
-			repr.field("data", &self.data);
-		}
+		let repr = match &self.data {
+			Data::Bytes (bytes) => repr.field("data", bytes),
+			Data::String(str  ) => repr.field("data", &str)
+		};
 		repr.finish()
 	}
 }
@@ -847,7 +963,7 @@ impl Eq for ByteString { }
 
 impl PartialEq for ByteString {
 	fn eq(&self, other: &Self) -> bool {
-		self.data == other.data
+		&*self.data == &*other.data
 	}
 }
 
@@ -865,13 +981,13 @@ impl Ord for ByteString {
 
 impl PartialOrd for ByteString {
 	fn partial_cmp(&self, Self { data, .. }: &Self) -> Option<Ordering> {
-		self.data.partial_cmp(data)
+		self.data.deref().partial_cmp(data.deref())
 	}
 }
 
 impl Extend<u8> for ByteString {
 	fn extend<T: IntoIterator<Item = u8>>(&mut self, iter: T) {
-		self.set_utf8(false);
+		self.unmark_utf8();
 		self.data.extend(iter)
 	}
 }

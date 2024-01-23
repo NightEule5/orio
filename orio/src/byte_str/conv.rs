@@ -50,24 +50,6 @@ impl<'a> Borrow<[&'a [u8]]> for ByteStr<'a> {
 	}
 }
 
-impl From<String> for ByteString {
-	fn from(data: String) -> Self {
-		Self {
-			is_utf8: true.into(),
-			data: data.into_bytes()
-		}
-	}
-}
-
-impl From<Vec<u8>> for ByteString {
-	fn from(data: Vec<u8>) -> Self {
-		Self {
-			is_utf8: false.into(),
-			data
-		}
-	}
-}
-
 impl From<&str> for ByteString {
 	fn from(value: &str) -> Self {
 		value.to_owned().into()

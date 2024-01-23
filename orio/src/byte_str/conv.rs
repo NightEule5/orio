@@ -50,7 +50,6 @@ impl<'a> Borrow<[&'a [u8]]> for ByteStr<'a> {
 	}
 }
 
-
 impl From<String> for ByteString {
 	fn from(data: String) -> Self {
 		Self {

@@ -6,16 +6,18 @@ mod hash;
 mod iter;
 
 use std::borrow::Cow;
-use std::ops::{Add, AddAssign, Index, RangeBounds};
+use std::ops::{Add, AddAssign, Index, Range, RangeBounds};
 use std::{fmt, slice};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
-use std::slice::SliceIndex;
+use std::iter::once;
 use std::str::from_utf8_unchecked;
+use all_asserts::assert_le;
 use simdutf8::compat::from_utf8;
 use crate::Utf8Error;
 use crate::util::partial_utf8::read_partial_utf8_into;
+use crate::pattern::Pattern;
 pub use encoding::EncodeBytes;
 pub use iter::*;
 
@@ -82,42 +84,22 @@ impl<'a> ByteStr<'a> {
 	}
 
 	/// Returns a byte string borrowing bytes within `range` from this byte string.
-	pub fn range<R: RangeBounds<usize>>(&self, range: R) -> ByteStr {
-		let Self { data, utf8, len } = self;
-		let range = slice::range(range, ..*len);
-		let utf8 = utf8.as_ref().and_then(|str|
-			range.clone()
-				 .get(str.as_ref())
-				 .map(Into::into)
-		);
-
-		let mut front_skip = range.start;
-		let skip_len = data.iter().take_while(|&&slice|
-			front_skip >= slice.len() && {
-				front_skip -= slice.len();
-				true
+	pub fn range<R: RangeBounds<usize>>(&self, range: R) -> ByteStr<'a> {
+		let range = slice::range(range, ..self.len);
+		let utf8 = self.utf8.as_ref().and_then(|str| {
+			let range = range.clone();
+			match str {
+				&Cow::Borrowed(str) => str.get(range).map(Into::into),
+				Cow::Owned(str) => str.get(range).map(|str| str.to_owned().into())
 			}
-		).count();
-		let mut take = range.len();
-		let substr = data[skip_len..].iter().map_while(|&slice| {
-			if front_skip > 0 {
-				let slice = &slice[front_skip..];
-				front_skip = 0;
-				Some(slice)
-			} else if take > 0 {
-				let slice = &slice[..take.min(slice.len())];
-				take -= slice.len();
-				Some(slice)
-			} else {
-				None
-			}
-		}).collect();
-		ByteStr { utf8, ..substr }
+		});
+		self.slices_in_range(range)
+			.into_byte_str(utf8)
 	}
 
 	/// Decodes and caches the bytes as UTF-8, returning a borrow of the cache.
 	/// Subsequent calls to this function will borrow from the cache, and calls to
-	/// [`utf8`][] will clone from it.
+	/// [`utf8`] will clone from it.
 	///
 	/// [`utf8`]: Self::utf8
 	pub fn cache_utf8(&mut self) -> Result<&str, Utf8Error> {
@@ -130,7 +112,7 @@ impl<'a> ByteStr<'a> {
 	}
 
 	/// Returns a string of UTF-8-decoded bytes, cloning from the value cached by
-	/// [`utf8_cache`][] if any.
+	/// [`utf8_cache`] if any.
 	///
 	/// [`utf8_cache`]: Self::utf8_cache
 	pub fn utf8(&self) -> Result<Cow<'a, str>, Utf8Error> {
@@ -145,6 +127,269 @@ impl<'a> ByteStr<'a> {
 	/// has not been decoded.
 	pub fn cached_utf8(&self) -> Option<&str> {
 		self.utf8.as_deref()
+	}
+
+	/// Finds the first range matching `pattern` in the byte string.
+	pub fn find(&self, pattern: impl Pattern) -> Option<Range<usize>> {
+		match self.cached_utf8() {
+			Some(utf8) => pattern.find_in_str(once(utf8)),
+			_ => pattern.find_in(self.slices())
+		}
+	}
+
+	/// Finds the first range matching `pattern` in the byte string, within a byte
+	/// `range`.
+	pub fn find_in_range<R: RangeBounds<usize>>(
+		&self,
+		pattern: impl Pattern,
+		range: R
+	) -> Option<Range<usize>> {
+		let range = slice::range(range, ..self.len);
+		match self.cached_utf8().and_then(|str|
+			str.get(range.clone())
+		) {
+			Some(utf8) => pattern.find_in_str(once(utf8)),
+			_ => pattern.find_in(self.slices_in_range(range))
+		}
+	}
+
+	/// Iterates over ranges matching `pattern` in the byte string.
+	pub fn matches<'b, P>(&'b self, pattern: P) -> impl Iterator<Item = Range<usize>> + 'b
+						  where P: Pattern,
+								P::Matcher: 'b {
+		use std::iter::Once;
+		use crate::pattern::{Matcher, Matches, StrMatches};
+		enum _Matches<'a, 'b: 'a, M> {
+			Bytes (Matches<'b, Slices<'a, 'b>, M>),
+			String(StrMatches<'b, Once<&'b str>, M>)
+		}
+
+		impl<'a, M: Matcher> Iterator for _Matches<'a, '_, M> {
+			type Item = Range<usize>;
+
+			fn next(&mut self) -> Option<Self::Item> {
+				match self {
+					Self::Bytes (matches) => matches.next(),
+					Self::String(matches) => matches.next()
+				}
+			}
+		}
+
+		match self.cached_utf8() {
+			Some(utf8) => _Matches::String(pattern.matches_in_str(once(utf8))),
+			_ => _Matches::Bytes(pattern.matches_in(self.slices()))
+		}
+	}
+
+	/// Splits the byte string into a pair of borrowed strings at an index. The
+	/// first contains bytes in range `[0, mid)` (with a length of `mid` bytes),
+	/// the second contains bytes in range `[mid, len)`.
+	///
+	/// The returned bytes will contain valid UTF-8 if the current bytes are marked
+	/// as valid UTF-8, and `mid` falls on a character boundary.
+	pub fn split_at(&self, mid: usize) -> (ByteStr<'a>, ByteStr<'a>) {
+		fn split<'a>(slices: &Vec<&'a [u8]>, mid: usize, len: usize) -> (Vec<&'a [u8]>, Vec<&'a [u8]>) {
+			assert_le!(mid, len, "split index out of bounds");
+
+			match &slices[..] {
+				_ if mid == len => (slices.clone(), vec![]),
+				_ if mid == 0   => (vec![], slices.clone()),
+				[] => (vec![], vec![]),
+				[slice] => {
+					let (a, b) = slice.split_at(mid);
+					(vec![a], vec![b])
+				}
+				slices => {
+					// Find the index at which the total count reaches or exceeds
+					// the midpoint, and this final count.
+					let (boundary_index, boundary_count) =
+						slices.iter().scan(0, |count, slice|
+							(*count < mid).then(|| {
+								*count += slice.len();
+								*count
+							})
+						).enumerate()
+						 .last()
+						 .unwrap();
+					if boundary_count == mid {
+						let (a, b) = slices.split_at(boundary_index);
+						(a.to_vec(), b.to_vec())
+					} else {
+						let mut first = slices[..=boundary_index].to_vec();
+						let mut last  = slices[boundary_index.. ].to_vec();
+						let [.., first_overlap] = &mut first[..] else { unreachable!() };
+						let [last_overlap, .. ] = &mut last [..] else { unreachable!() };
+						let overlap_len = first_overlap.len() - boundary_count - mid;
+						*first_overlap = &first_overlap[..overlap_len];
+						* last_overlap = & last_overlap[overlap_len..];
+						(first, last)
+					}
+				}
+			}
+		}
+
+		fn count(slices: &[&[u8]]) -> usize {
+			slices.iter()
+				  .copied()
+				  .map(<[u8]>::len)
+				  .sum()
+		}
+
+		let (data_a, data_b) = split(&self.data, mid, self.len);
+		let (utf8_a, utf8_b) = self.utf8.as_ref().and_then(|str|
+			str.is_char_boundary(mid).then(||
+				match str {
+					Cow::Borrowed(str) => {
+						let (a, b) = str.split_at(mid);
+						(a.into(), b.into())
+					}
+					Cow::Owned(str) => {
+						let (a, b) = str.split_at(mid);
+						(a.to_owned().into(), b.to_owned().into())
+					}
+				}
+			)
+		).unzip();
+		(
+			ByteStr::from_vec::<Cow<_>>(data_a.to_vec(), utf8_a, count(&data_a)),
+			ByteStr::from_vec::<Cow<_>>(data_b.to_vec(), utf8_b, count(&data_b))
+		)
+	}
+
+	/// Splits the byte string into two owned sequences, returning an allocated
+	/// byte string containing bytes in range `[at, len)`, leaving the current one
+	/// containing bytes in range `[0, at)`.
+	///
+	/// The bytes strings will contain valid UTF-8 if the current one is marked as
+	/// valid UTF-8, and the index falls on a character boundary.
+	pub fn split_off(&mut self, mid: usize) -> Self {
+		fn split<'a>(slices: &mut Vec<&'a [u8]>, mid: usize, len: usize) -> Vec<&'a [u8]> {
+			assert_le!(mid, len, "split index out of bounds");
+
+			match &mut slices[..] {
+				_ if mid == len => vec![],
+				_ if mid == 0   => {
+					let clone = slices.clone();
+					slices.clear();
+					clone
+				}
+				[slice] => {
+					let (a, b) = slice.split_at(mid);
+					*slice = a;
+					vec![b]
+				}
+				_ => {
+					// Find the index at which the total count reaches or exceeds
+					// the midpoint, and this final count.
+					let (boundary_index, boundary_count) =
+						slices.iter().scan(0, |count, slice|
+							(*count < mid).then(|| {
+								*count += slice.len();
+								*count
+							})
+						).enumerate()
+						 .last()
+						 .unwrap();
+					if boundary_count == mid {
+						slices.split_off(boundary_index)
+					} else {
+						slices.truncate(boundary_index + 1);
+						let mut last  = slices[boundary_index.. ].to_vec();
+						let [.., first_overlap] = &mut slices[..] else { unreachable!() };
+						let [last_overlap, .. ] = &mut last  [..] else { unreachable!() };
+						let overlap_len = first_overlap.len() - boundary_count - mid;
+						*first_overlap = &first_overlap[..overlap_len];
+						* last_overlap = & last_overlap[overlap_len..];
+						last
+					}
+				}
+			}
+		}
+
+		let utf8 = self.utf8.as_mut().and_then(|str|
+			str.is_char_boundary(mid).then(||
+				match str {
+					Cow::Borrowed(str) => {
+						let (a, b) = str.split_at(mid);
+						*str = a;
+						Cow::Borrowed(b)
+					}
+					Cow::Owned(str) => Cow::Owned(str.split_off(mid))
+				}
+			)
+		);
+		Self::from_vec(
+			split(&mut self.data, mid, self.len),
+			utf8,
+			self.len
+		)
+	}
+
+	/// Splits the byte string into a pair of borrowed sequences at the first match
+	/// of a `delimiter` pattern, returning `None` if no match is found. The first
+	/// contains bytes in range `[0, start)`, the second contains bytes in range
+	/// `[end, len)`.
+	pub fn split_once(&self, delimiter: impl Pattern) -> Option<(ByteStr, ByteStr)> {
+		let Range { start, end } = self.find(delimiter)?;
+		let (mut first, last) = self.split_at(end);
+		first.truncate(start);
+		Some((first, last))
+	}
+
+	/// Replaces all occurrences of a pattern with a slice, returning a new owned
+	/// byte string.
+	pub fn replace(&self, from: impl Pattern, to: &[u8]) -> ByteString {
+		use simdutf8::basic::from_utf8;
+		let is_utf8 = self.utf8.is_some() && from_utf8(to).is_ok();
+		let mut data = Vec::with_capacity(self.len);
+		let mut last = 0;
+		for Range { start, end } in self.matches(from) {
+			for slice in self.slices_in_range(last..start) {
+				data.extend_from_slice(slice);
+			}
+			data.extend_from_slice(to);
+			last = end;
+		}
+
+		for slice in self.slices_in_range(last..self.len) {
+			data.extend_from_slice(slice);
+		}
+
+		ByteString { is_utf8: is_utf8.into(), data }
+	}
+
+	/// Shortens the byte string length to a maximum of `len` bytes.
+	pub fn truncate(&mut self, mut len: usize) {
+		let Self { data, utf8, .. } = self;
+
+		match utf8 {
+			Some(Cow::Borrowed(str)) if str.is_char_boundary(len) => *str = &str[..len],
+			Some(Cow::Owned   (str)) if str.is_char_boundary(len) => str.truncate(len),
+			_ => *utf8 = None
+		}
+
+		match &mut data[..] {
+			[slice] if len < self.len => {
+				*slice = &slice[..self.len];
+				self.len = len;
+			}
+			_ if len < self.len =>
+				// This creates no holes, it is equivalent to truncating.
+				self.data.retain_mut(|slice|
+					if len == 0 {
+						false
+					} else {
+						if slice.len() > len {
+							*slice = &slice[..len];
+							len = 0;
+						} else {
+							len -= slice.len();
+						}
+						true
+					}
+				),
+			_ => { }
+		}
 	}
 
 	/// Iterates over segment slices in the byte string.
@@ -173,6 +418,18 @@ impl<'a> ByteStr<'a> {
 }
 
 impl<'a> ByteStr<'a> {
+	fn from_slice(data: &'a [u8], utf8: Option<&'a str>) -> Self {
+		Self::from_vec(vec![data], utf8, data.len())
+	}
+
+	fn from_vec<U: Into<Cow<'a, str>>>(data: Vec<&'a [u8]>, utf8: Option<U>, len: usize) -> Self {
+		Self {
+			data,
+			utf8: utf8.map(Into::into),
+			len
+		}
+	}
+
 	fn decode_utf8(&self) -> Result<Cow<'a, str>, Utf8Error> {
 		match &*self.data {
 			&[bytes] => Ok(from_utf8(bytes)?.into()),
@@ -182,6 +439,10 @@ impl<'a> ByteStr<'a> {
 				Ok(buf.into())
 			}
 		}
+	}
+
+	fn slices_in_range(&self, range: Range<usize>) -> SlicesInRange<'a, '_> {
+		SlicesInRange::new(range, self.slices())
 	}
 }
 
@@ -358,16 +619,10 @@ impl ByteString {
 	pub fn range<R: RangeBounds<usize>>(&self, range: R) -> ByteStr<'_> {
 		let range = slice::range(range, ..self.len());
 		let utf8 = self.checked_utf8().and_then(|str|
-			range.clone()
-				 .get(str)
-				 .map(Into::into)
+			str.get(range.clone())
 		);
-		let slice = &self.as_slice()[range];
-		ByteStr {
-			utf8,
-			data: vec![slice],
-			len: slice.len(),
-		}
+		let data = &self.data[range];
+		ByteStr::from_slice(data, utf8)
 	}
 
 	/// Returns a string of UTF-8-decoded bytes.
@@ -380,6 +635,126 @@ impl ByteString {
 			self.is_utf8.set(true);
 			Ok(utf8)
 		}
+	}
+
+	/// Finds the first range matching `pattern` in the byte string.
+	pub fn find(&self, pattern: impl Pattern) -> Option<Range<usize>> {
+		match self.checked_utf8() {
+			Some(utf8) => pattern.find_in_str(once(utf8)),
+			_ => pattern.find_in(once(&self.data[..]))
+		}
+	}
+
+	/// Finds the first range matching `pattern` in the byte string, within a byte
+	/// `range`.
+	pub fn find_in_range<R: RangeBounds<usize>>(
+		&self,
+		pattern: impl Pattern,
+		range: R
+	) -> Option<Range<usize>> {
+		let range = slice::range(range, ..self.data.len());
+		match self.checked_utf8().and_then(|str|
+			str.get(range.clone())
+		) {
+			Some(utf8) => pattern.find_in_str(once(utf8)),
+			_ => pattern.find_in(once(&self.data[range]))
+		}
+	}
+
+	/// Iterates over ranges matching `pattern` in the byte string.
+	pub fn matches<'a, P>(&'a self, pattern: P) -> impl Iterator<Item = Range<usize>> + 'a
+	where P: Pattern,
+		  P::Matcher: 'a {
+		use std::iter::Once;
+		use crate::pattern::{Matcher, Matches, StrMatches};
+		enum _Matches<'a, M> {
+			Bytes (Matches<'a, Once<&'a [u8]>, M>),
+			String(StrMatches<'a, Once<&'a str >, M>)
+		}
+
+		impl<M: Matcher> Iterator for _Matches<'_, M> {
+			type Item = Range<usize>;
+
+			fn next(&mut self) -> Option<Self::Item> {
+				match self {
+					Self::Bytes (matches) => matches.next(),
+					Self::String(matches) => matches.next()
+				}
+			}
+		}
+
+		match self.checked_utf8() {
+			Some(utf8) => _Matches::String(pattern.matches_in_str(once(utf8))),
+			_ => _Matches::Bytes(pattern.matches_in(once(&self.data[..])))
+		}
+	}
+
+	/// Splits the byte string into a pair of borrowed strings at an index. The
+	/// first contains bytes in range `[0, mid)` (with a length of `mid` bytes),
+	/// the second contains bytes in range `[mid, len)`.
+	///
+	/// The returned bytes will contain valid UTF-8 if the current bytes are marked
+	/// as valid UTF-8, and `mid` falls on a character boundary.
+	pub fn split_at(&self, mid: usize) -> (ByteStr, ByteStr) {
+		let (data_a, data_b) = self.data.split_at(mid);
+		let (utf8_a, utf8_b) = self.checked_utf8().and_then(|utf8| {
+			utf8.is_char_boundary(mid)
+				.then(|| utf8.split_at(mid))
+		}).unzip();
+		(
+			ByteStr::from_slice(data_a, utf8_a),
+			ByteStr::from_slice(data_b, utf8_b)
+		)
+	}
+
+	/// Splits the byte string into two owned sequences, returning an allocated
+	/// byte string containing bytes in range `[at, len)`, leaving the current one
+	/// containing bytes in range `[0, at)`.
+	///
+	/// The bytes strings will contain valid UTF-8 if the current one is marked as
+	/// valid UTF-8, and the index falls on a character boundary.
+	pub fn split_off(&mut self, at: usize) -> Self {
+		self.set_utf8_split(at);
+		let data = self.data.split_off(at);
+		Self {
+			is_utf8: self.is_utf8.clone(),
+			data
+		}
+	}
+
+	/// Splits the byte string into a pair of borrowed sequences at the first match
+	/// of a `delimiter` pattern, returning `None` if no match is found. The first
+	/// contains bytes in range `[0, start)`, the second contains bytes in range
+	/// `[end, len)`.
+	pub fn split_once(&self, delimiter: impl Pattern) -> Option<(ByteStr, ByteStr)> {
+		let Range { start, end } = self.find(delimiter)?;
+		let (mut first, last) = self.split_at(end);
+		first.truncate(start);
+		Some((first, last))
+	}
+
+	/// Replaces all occurrences of a pattern with a slice, returning a new byte
+	/// string.
+	pub fn replace(&self, from: impl Pattern, to: &[u8]) -> Self {
+		use simdutf8::basic::from_utf8;
+		let is_utf8 = self.is_utf8.get() && from_utf8(to).is_ok();
+		let mut data = Vec::with_capacity(self.len());
+		let mut last = 0;
+		for Range { start, end } in self.matches(from) {
+			data.extend_from_slice(&self.data[last..start]);
+			data.extend_from_slice(to);
+			last = end;
+		}
+
+		data.extend_from_slice(&self.data[last..]);
+
+		Self { is_utf8: is_utf8.into(), data }
+	}
+
+	/// Shortens the byte string length to a maximum of `len` bytes.
+	pub fn truncate(&mut self, len: usize) {
+		self.set_utf8_split(len);
+		self.data.truncate(len);
 	}
 
 	/// Appends `slice` to the byte string.
@@ -395,11 +770,7 @@ impl ByteString {
 
 	/// Borrows the data into a [`ByteStr`].
 	pub fn as_byte_str(&self) -> ByteStr<'_> {
-		ByteStr {
-			utf8: self.checked_utf8().map(Into::into),
-			data: vec![&self.data],
-			len: self.len(),
-		}
+		ByteStr::from_slice(&self.data, self.checked_utf8())
 	}
 
 	/// Returns the internal data as a slice of bytes.
@@ -432,6 +803,13 @@ impl ByteString {
 		}
 	}
 
+	fn set_utf8_split(&mut self, idx: usize) {
+		self.set_utf8(
+			self.checked_utf8()
+				.is_some_and(|str| str.is_char_boundary(idx))
+		);
+	}
+
 	fn set_utf8(&mut self, value: bool) {
 		*self.is_utf8.get_mut() = value;
 	}
@@ -456,11 +834,12 @@ impl fmt::Debug for ByteString {
 	}
 }
 
-impl<I: SliceIndex<[u8]>> Index<I> for ByteString {
-	type Output = I::Output;
+impl<I> Index<I> for ByteString where [u8]: Index<I> {
+	type Output = <[u8] as Index<I>>::Output;
 
+	#[inline]
 	fn index(&self, index: I) -> &Self::Output {
-		index.index(self.as_slice())
+		self.as_slice().index(index)
 	}
 }
 

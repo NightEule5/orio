@@ -48,7 +48,6 @@
 	read_buf,
 	seek_stream_len,
 	slice_as_chunks,
-	slice_index_methods,
 	slice_range,
 	specialization,
 	thread_local,

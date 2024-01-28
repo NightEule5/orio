@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+//! Types containing borrowed-segmented or owned sequences of bytes, called *byte
+//! strings*. These can be decoded to UTF-8, hashed, sliced, split, pattern matched,
+//! and encoded to or decoded from base64 and hex strings. [`ByteStr`] is analogous
+//! to [`str`], containing borrowed bytes, but can contain multiple slices. [`ByteString`]
+//! is analogous to [`String`], containing a contiguous sequence of bytes.
+
 mod conv;
 mod decoding;
 mod encoding;

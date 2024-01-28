@@ -26,6 +26,11 @@ pub trait Pattern: Sized {
 		self.into_matcher().matches(haystack)
 	}
 
+	/// Finds matching ranges in a `haystack` iterator.
+	fn matches_in_str<'a, I: IntoIterator<Item = &'a str>>(self, haystack: I) -> StrMatches<'a, I::IntoIter, Self::Matcher> {
+		self.into_matcher().str_matches(haystack)
+	}
+
 	/// Finds the first match in a `haystack` iterator, returning the matching range
 	/// if found.
 	fn find_in<'a>(self, haystack: impl IntoIterator<Item = &'a [u8]>) -> Option<Range<usize>> {

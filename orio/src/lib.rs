@@ -48,13 +48,13 @@
 	read_buf,
 	seek_stream_len,
 	slice_as_chunks,
-	slice_index_methods,
 	slice_range,
 	specialization,
 	thread_local,
 	try_blocks,
 	type_alias_impl_trait,
 )]
+#![feature(iter_advance_by)]
 
 mod buffer;
 mod buffered_wrappers;

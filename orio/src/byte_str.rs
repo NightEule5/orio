@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod conv;
+mod decoding;
 mod encoding;
 mod hash;
 mod iter;

@@ -4,6 +4,7 @@ mod conv;
 mod encoding;
 mod hash;
 mod iter;
+mod parsing;
 
 use std::borrow::{Borrow, Cow};
 use std::ops::{Add, AddAssign, Deref, DerefMut, Index, Range, RangeBounds};
@@ -18,6 +19,8 @@ use crate::util::partial_utf8::read_partial_utf8_into;
 use crate::pattern::Pattern;
 pub use encoding::EncodeBytes;
 pub use iter::*;
+pub use hash::*;
+pub use parsing::*;
 
 /// A borrowed, segmented string of bytes.
 #[derive(Clone)]

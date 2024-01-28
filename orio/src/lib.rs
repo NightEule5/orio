@@ -54,6 +54,7 @@
 	try_blocks,
 	type_alias_impl_trait,
 )]
+#![feature(iter_advance_by)]
 
 mod buffer;
 mod buffered_wrappers;

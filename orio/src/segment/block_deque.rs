@@ -49,7 +49,7 @@ fn split_range_mut<T>(slice: &mut [T], mut a: Range<usize>, mut b: Range<usize>)
 	} else {
 		let (slice_b, slice_a) = slice.split_at_mut(b.end);
 		a.start -= slice_b.len();
-		b.end   -= slice_b.len();
+		a.end   -= slice_b.len();
 		(&mut slice_a[a], &mut slice_b[b])
 	}
 }

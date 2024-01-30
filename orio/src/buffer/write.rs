@@ -73,6 +73,15 @@ impl<'d, const N: usize, P: Pool<N>> BufSink<'d, N> for Buffer<'d, N, P> {
 		}
 		Ok(count)
 	}
+
+	fn write_u8(&mut self, value: u8) -> Result {
+		self.reserve(1).context(Write)?;
+		let mut seg = self.data.back_mut().expect(
+			"buffer should have writable segments after reserve"
+		);
+		seg.push(value).expect("back segment should be writable");
+		Ok(())
+	}
 }
 
 /// Iterates over writable segments in a buffer, returning mutable slices of their

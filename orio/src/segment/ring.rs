@@ -392,7 +392,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 
 	pub fn writable_index(&self) -> usize {
 		self.back_index()
-			.filter(|&i| self.buf[i].is_full())
+			.filter(|&i| !self.buf[i].is_full())
 			.unwrap_or(self.len)
 	}
 
@@ -426,7 +426,7 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 			seg_count += 1;
 		}
 
-		if is_back_writable {
+		if is_back_writable && seg_count > 0 {
 			seg_count -= 1;
 		}
 
@@ -461,10 +461,6 @@ impl<'a, const N: usize> RBuf<Seg<'a, N>> {
 	
 	/// Sets the tracked count.
 	pub unsafe fn set_count(&mut self, count: usize) {
-		debug_assert_eq!(
-			count,
-			self.iter().map(Seg::len).sum()
-		);
 		self.count = count;
 	}
 

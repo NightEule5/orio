@@ -15,7 +15,7 @@ pub struct BufferedSource<'d, S: Source<'d, SIZE>, P: Pool<SIZE>> {
 
 #[inline]
 fn max_read_size(buffer_limit: usize, segment_size: usize) -> usize {
-	buffer_limit.min(segment_size)
+	buffer_limit.max(segment_size)
 }
 
 #[inline]
@@ -126,7 +126,7 @@ impl<'d, S: Source<'d, SIZE>, P: Pool<SIZE>> BufStream<'d, SIZE> for BufferedSou
 impl<'d, S: Source<'d, SIZE>, P: Pool<SIZE>> BufSource<'d, SIZE> for BufferedSource<'d, S, P> {
 	fn request(&mut self, count: usize) -> StreamResult<bool> {
 		self.check_open(Read)?;
-		if self.is_eos() { return Ok(false) }
+		if self.is_eos() && self.buffer.is_empty() { return Ok(false) }
 
 		let (buffer, source, eos) = self.internals();
 

@@ -155,14 +155,22 @@ pub trait Source<'d, const N: usize = SIZE>: Stream<N> {
 pub trait SourceExt<'d, const N: usize, P: Pool<N>>: Source<'d, N> + Sized {
 	type Buffered: BufSource<'d, N, Pool = P>;
 
-	fn buffered(self) -> Self::Buffered;
+	fn buffered(self) -> Self::Buffered {
+		self.buffered_with(Buffer::default())
+	}
+
+	fn buffered_with_capacity(self, capacity: usize) -> Self::Buffered {
+		self.buffered_with(Buffer::with_capacity(capacity))
+	}
+
+	fn buffered_with(self, buffer: Buffer<'d, N, P>) -> Self::Buffered;
 }
 
 impl<'d, S: Source<'d, SIZE>> SourceExt<'d, SIZE, DefaultPoolContainer> for S {
 	type Buffered = BufferedSource<'d, Self, DefaultPoolContainer>;
 
-	fn buffered(self) -> Self::Buffered {
-		BufferedSource::new(self, Buffer::default())
+	fn buffered_with(self, buffer: Buffer<'d>) -> Self::Buffered {
+		BufferedSource::new(self, buffer)
 	}
 }
 
@@ -197,14 +205,22 @@ pub trait Sink<'d, const N: usize = SIZE>: Stream<N> {
 pub trait SinkExt<'d, const N: usize, P: Pool<N>>: Sink<'d, N> + Sized {
 	type Buffered: BufSink<'d, N, Pool = P>;
 
-	fn buffered(self) -> Self::Buffered;
+	fn buffered(self) -> Self::Buffered {
+		self.buffered_with(Buffer::default())
+	}
+
+	fn buffered_with_capacity(self, capacity: usize) -> Self::Buffered {
+		self.buffered_with(Buffer::with_capacity(capacity))
+	}
+
+	fn buffered_with(self, buffer: Buffer<'d, N, P>) -> Self::Buffered;
 }
 
 impl<'d, S: Sink<'d, SIZE>> SinkExt<'d, SIZE, DefaultPoolContainer> for S {
 	type Buffered = BufferedSink<'d, Self, DefaultPoolContainer>;
 
-	fn buffered(self) -> Self::Buffered {
-		BufferedSink::new(self, Buffer::default())
+	fn buffered_with(self, buffer: Buffer<'d, SIZE, DefaultPoolContainer>) -> Self::Buffered {
+		BufferedSink::new(self, buffer)
 	}
 }
 
@@ -584,7 +600,10 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 
 	/// Writes a [`u8`].
 	#[inline]
-	fn write_u8(&mut self, value: u8) -> Result { self.write_pod(value) }
+	fn write_u8(&mut self, value: u8) -> Result {
+		self.buf_mut().write_u8(value).context(Write)?;
+		self.drain_buffered().context(Write)
+	}
 
 	/// Writes an [`i8`].
 	#[inline]

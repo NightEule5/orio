@@ -11,6 +11,7 @@ use all_asserts::assert_le;
 use itertools::Itertools;
 pub use iter::*;
 use crate::pattern::Whitespace;
+use crate::Utf8Error;
 
 /// The matcher alignment, whether the matcher operates on characters or bytes.
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
@@ -274,18 +275,6 @@ impl PartialMatch {
 	}
 }
 
-trait SliceMatcherSpec {
-	fn state(&self) -> &PartialMatch;
-	fn state_mut(&mut self) -> &mut PartialMatch;
-	fn pattern(&self) -> &[u8];
-	fn width(&self) -> usize {
-		self.pattern().len()
-	}
-	fn remaining_pattern(&self) -> &[u8] {
-		self.state().remaining_in(self.pattern())
-	}
-}
-
 /// A matcher for a byte sequence slice.
 #[derive(Copy, Clone, Debug)]
 pub struct SliceMatcher<'a> {
@@ -308,25 +297,94 @@ impl<'a> From<&'a str> for SliceMatcher<'a> {
 	}
 }
 
-impl SliceMatcherSpec for SliceMatcher<'_> {
-	fn state(&self) -> &PartialMatch {
-		&self.partial
+impl Matcher for SliceMatcher<'_> {
+	fn next(&mut self, haystack: &[u8], offset: usize) -> Option<MatchStep> {
+		if haystack.is_empty() {
+			return None
+		}
+
+		self.partial.reset_invalid(offset);
+
+		let step = if self.partial.is_empty() {
+			if let Some((start, count)) = find_partial(haystack, &self.pattern) {
+				if count == self.pattern.len() {
+					MatchStep::complete(start + offset, count, start + self.pattern.len())
+				} else {
+					self.partial.start(start + offset, count);
+					MatchStep::partial(start + offset, count)
+				}
+			} else {
+				MatchStep::reject(haystack.len())
+			}
+		} else if let Some(count) = extend_partial(
+			haystack,
+			self.partial.remaining_in(&self.pattern)
+		) {
+			let partial_count = self.partial.extend_by(count);
+			assert_le!(partial_count, self.pattern.len());
+			if partial_count == self.pattern.len() {
+				let consumed = count;
+				let (start, count) = self.partial.reset();
+				MatchStep::complete(start, count, consumed)
+			} else {
+				MatchStep::partial(self.partial.start, count)
+			}
+		} else {
+			MatchStep::reject(haystack.len())
+		};
+
+		Some(step)
 	}
-	fn state_mut(&mut self) -> &mut PartialMatch {
-		&mut self.partial
+
+	fn end(&mut self) -> Option<MatchStep> {
+		match self.partial.reset() {
+			(_, 0) => None,
+			(_, _) => Some(MatchStep::reject(0))
+		}
 	}
-	fn pattern(&self) -> &[u8] { self.pattern }
 }
 
 /// A matcher for a unicode `char`.
-#[derive(Copy, Clone, Debug)]
-pub struct UnicodeMatcher {
-	bytes: [u8; 4],
-	width: usize,
-	partial: PartialMatch
+#[derive(Copy, Clone, Debug, amplify_derive::From)]
+pub struct UnicodeMatcher(char);
+
+impl Matcher for UnicodeMatcher {
+	fn next(&mut self, haystack: &[u8], offset: usize) -> Option<MatchStep> {
+		match simdutf8::compat::from_utf8(haystack) {
+			Ok(checked) => self.next_in_str(checked, offset),
+			Err(err) => {
+				let err = Utf8Error::from(err);
+				let checked = unsafe { err.valid_in(haystack) };
+				self.next_in_str(checked, offset).map(|mut step| {
+					if let MatchStep::Reject { consumed } = &mut step {
+						*consumed += err.count;
+					}
+					step
+				})
+			}
+		}
+	}
+
+	fn next_in_str(&mut self, haystack: &str, offset: usize) -> Option<MatchStep> {
+		(!haystack.is_empty()).then(||
+			haystack.find(self.0).map_or(MatchStep::reject(haystack.len()), |start| {
+				let char_len = self.0.len_utf8();
+				MatchStep::complete(
+					start + offset,
+					char_len,
+					start + char_len
+				)
+			})
+		)
+	}
+
+	#[inline]
+	fn alignment(&self) -> Alignment {
+		Alignment::Char
+	}
 }
 
-impl From<char> for UnicodeMatcher {
+/*impl From<char> for UnicodeMatcher {
 	fn from(value: char) -> Self {
 		let mut bytes = [0; 4];
 		let width = value.encode_utf8(&mut bytes).len();
@@ -349,51 +407,7 @@ impl SliceMatcherSpec for UnicodeMatcher {
 		&self.bytes[..self.width]
 	}
 	fn width(&self) -> usize { self.width }
-}
-
-impl<T: SliceMatcherSpec> Matcher for T {
-	fn next(&mut self, haystack: &[u8], offset: usize) -> Option<MatchStep> {
-		if haystack.is_empty() {
-			return None
-		}
-
-		self.state_mut().reset_invalid(offset);
-
-		let step = if self.state().is_empty() {
-			if let Some((start, count)) = find_partial(haystack, self.pattern()) {
-				if count == self.width() {
-					MatchStep::complete(start + offset, count, start + self.width())
-				} else {
-					self.state_mut().start(start + offset, count);
-					MatchStep::partial(start + offset, count)
-				}
-			} else {
-				MatchStep::reject(haystack.len())
-			}
-		} else if let Some(count) = extend_partial(haystack, self.remaining_pattern()) {
-			let partial_count = self.state_mut().extend_by(count);
-			assert_le!(partial_count, self.width());
-			if partial_count == self.width() {
-				let consumed = count;
-				let (start, count) = self.state_mut().reset();
-				MatchStep::complete(start, count, consumed)
-			} else {
-				MatchStep::partial(self.state().start, count)
-			}
-		} else {
-			MatchStep::reject(haystack.len())
-		};
-
-		Some(step)
-	}
-
-	fn end(&mut self) -> Option<MatchStep> {
-		match self.state_mut().reset() {
-			(_, 0) => None,
-			(_, _) => Some(MatchStep::reject(0))
-		}
-	}
-}
+}*/
 
 macro_rules! enum_matcher {
     (

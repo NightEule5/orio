@@ -66,7 +66,7 @@ impl<'d, S: Source<'d, SIZE>, P: Pool<SIZE>> BufferedSource<'d, S, P> {
 
 	#[inline]
 	fn max_request_size(&self) -> usize {
-		self.buffer.limit().max(SIZE)
+		max_read_size(self.buffer.limit(), SIZE)
 	}
 
 	/// Determines the request size for a read of `count` bytes. Requests are at
@@ -372,17 +372,23 @@ impl<'d, S: Sink<'d, SIZE>, P: Pool<SIZE>> BufSink<'d, SIZE> for BufferedSink<'d
 	fn write_all(&mut self, source: &mut impl Source<'d, SIZE>) -> StreamResult<usize> {
 		self.check_open(Write)?;
 
-		let mut written = 0;
-		while let cur_written @ 1.. = source.fill_all(self.buf_mut()).context(Write)? {
-			written += cur_written;
-			if self.buffer.count() == 0 {
+		let mut count = 0;
+		loop {
+			self.drain_buffered().context(Write)?;
+
+			if self.buffer.capacity() == 0 {
+				self.buffer.reserve(SIZE).context(Write)?;
+			}
+
+			let written = source.fill_free(self.buf_mut()).context(Write)?;
+			if written == 0 {
 				break
 			}
 
-			self.drain_buffered().context(Write)?;
+			count += written;
 		}
 		self.drain_all_buffered().context(Write)?;
-		Ok(written)
+		Ok(count)
 	}
 
 	fn drain_all_buffered(&mut self) -> BufferResult {
@@ -395,7 +401,7 @@ impl<'d, S: Sink<'d, SIZE>, P: Pool<SIZE>> BufSink<'d, SIZE> for BufferedSink<'d
 	fn drain_buffered(&mut self) -> BufferResult {
 		self.check_open(Drain)?;
 		let (buf, sink) = self.internals();
-		sink.drain(buf, buf.full_segment_count())?;
+		sink.drain_full(buf)?;
 		Ok(())
 	}
 }

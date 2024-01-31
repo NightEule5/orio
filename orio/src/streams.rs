@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::result;
-use num_traits::PrimInt;
-use crate::pool::{DefaultPoolContainer, Pool, PoolError};
-
 mod seeking;
 mod void;
 mod hashing;
@@ -15,6 +11,10 @@ pub use void::*;
 pub use hashing::*;
 pub use file::*;
 pub use std_io::*;
+
+use std::result;
+use num_traits::PrimInt;
+use crate::pool::{DefaultPoolContainer, Pool};
 use crate::{Buffer, BufferResult, Error, ErrorSource, ResultContext, SIZE, StreamContext, StreamError};
 pub use crate::buffered_wrappers::{BufferedSink, BufferedSource};
 use crate::error::Context;
@@ -219,7 +219,7 @@ pub trait SinkExt<'d, const N: usize, P: Pool<N>>: Sink<'d, N> + Sized {
 impl<'d, S: Sink<'d, SIZE>> SinkExt<'d, SIZE, DefaultPoolContainer> for S {
 	type Buffered = BufferedSink<'d, Self, DefaultPoolContainer>;
 
-	fn buffered_with(self, buffer: Buffer<'d, SIZE, DefaultPoolContainer>) -> Self::Buffered {
+	fn buffered_with(self, buffer: Buffer<'d>) -> Self::Buffered {
 		BufferedSink::new(self, buffer)
 	}
 }
@@ -539,7 +539,9 @@ trait BufSourceSpec<'d, const N: usize>: BufSource<'d, N> {
 	) -> Result<usize> where StreamError: From<E> {
 		let initial = count;
 		while count > 0 {
-			count -= read(self.buf_mut(), count)?;
+			count = count.saturating_sub(
+				read(self.buf_mut(), count)?
+			);
 			self.request(count)?;
 			if self.is_eos() || self.available() == 0 {
 				break

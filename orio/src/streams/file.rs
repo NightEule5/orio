@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::{File, Metadata};
+use std::fs::File;
+use std::io;
+use std::path::Path;
 use crate::{Buffer, BufferResult, StreamResult};
 use crate::pool::Pool;
 use super::{ReaderSource, Seekable, SeekOffset, Source, Stream, WriterSink};
@@ -16,6 +18,10 @@ pub struct FileSource {
 pub type FileSink = WriterSink<File>;
 
 impl FileSource {
+	pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+		File::open(path).map(Into::into)
+	}
+
 	/// Sets whether vectored read operations are allowed.
 	#[inline]
 	pub fn set_allow_vectored(&mut self, value: bool) {

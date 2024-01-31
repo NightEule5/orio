@@ -2,7 +2,7 @@
 
 use orio::{Buffer, BufferResult, SIZE, StreamResult};
 use orio::pool::Pool;
-use orio::streams::{Source, Stream};
+use orio::streams::{BufSink, Source, Stream};
 
 #[derive(Copy, Clone)]
 pub struct Data<'a> {
@@ -68,33 +68,13 @@ impl<'d> Source<'d, SIZE> for Data<'d> {
 	}
 
 	fn fill(&mut self, sink: &mut Buffer<'d, SIZE, impl Pool<SIZE>>, count: usize) -> BufferResult<usize> {
-		let mut pushed = 0;
-		for mut chunk in self.text
-						 .as_bytes()
-						 .chunks(SIZE) {
-			if pushed >= count {
-				break
-			}
-
-			let remaining = count - pushed;
-			if chunk.len() > remaining {
-				chunk = &chunk[..remaining];
-			}
-
-			sink.push_slice(chunk);
-			pushed += chunk.len();
-		}
-
-		self.text = &self.text[pushed..];
-		Ok(pushed)
+		let slice = &self.text[..count.min(self.text.len())];
+		let count = sink.write_from_slice(slice.as_bytes())?;
+		self.text = &self.text[count..];
+		Ok(count)
 	}
 
 	fn fill_all(&mut self, sink: &mut Buffer<'d, SIZE, impl Pool<SIZE>>) -> BufferResult<usize> {
-		for chunk in self.text.as_bytes().chunks(SIZE) {
-			sink.push_slice(chunk);
-		}
-		let len = self.text.len();
-		self.text = "";
-		Ok(len)
+		self.fill(sink, self.text.len())
 	}
 }

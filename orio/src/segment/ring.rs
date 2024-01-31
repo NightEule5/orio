@@ -496,7 +496,7 @@ impl<T> RBuf<T> {
 }
 
 impl<'a, const N: usize> RBuf<Seg<'a, N>> {
-	fn back_index(&self) -> Option<usize> {
+	pub fn back_index(&self) -> Option<usize> {
 		(!self.is_empty())
 			.then(|| self.len - 1)
 			.filter(|&i| !self.buf[i].is_full())

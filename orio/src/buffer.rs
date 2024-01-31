@@ -72,7 +72,7 @@ impl<'d> Buffer<'d> {
 	
 	/// Creates a new buffer with `value` in big-endian order. Shorthand for:
 	///
-	/// ```no_run
+	/// ```ignore
 	/// use orio::Buffer;
 	/// use orio::streams::BufSink;
 	///
@@ -87,7 +87,7 @@ impl<'d> Buffer<'d> {
 	
 	/// Creates a new buffer with `value` in little-endian order. Shorthand for:
 	///
-	/// ```no_run
+	/// ```ignore
 	/// use orio::Buffer;
 	/// use orio::streams::BufSink;
 	///
@@ -103,7 +103,7 @@ impl<'d> Buffer<'d> {
 	/// Creates a new buffer from a UTF-8 string without copying its contents.
 	/// Shorthand for:
 	///
-	/// ```no_run
+	/// ```ignore
 	/// use orio::Buffer;
 	/// use orio::streams::BufSink;
 	///
@@ -119,7 +119,7 @@ impl<'d> Buffer<'d> {
 	/// Creates a new buffer from a slice without copying its contents. Shorthand
 	/// for:
 	///
-	/// ```no_run
+	/// ```ignore
 	/// use orio::Buffer;
 	/// use orio::streams::BufSink;
 	///
@@ -246,7 +246,7 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	/// or [`from_slice`]), where the borrowed data falls out of scope.
 	///
 	/// For example, this doesn't compile:
-	/// ```no_run
+	/// ```compile_fail
 	/// fn buf<'a, 'b>(data: &'b str) -> orio::Buffer<'a> {
 	/// 	orio::Buffer::from_utf8(data) // lifetime may not live long enough
 	/// }
@@ -478,7 +478,6 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		(&self.data).into()
 	}
 
-
 	/// Updates `hasher` with buffer data.
 	#[cfg(feature = "hash")]
 	pub fn hash(&self, hasher: &mut impl digest::Digest) {
@@ -502,12 +501,13 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 
 impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	pub(crate) fn full_segment_count(&self) -> usize {
-		let mut len = self.data.len();
-		if !self.data.back().is_some_and(Seg::is_full) {
-			len -= 1;
-		}
+		let len = self.data.back_index().filter(|&i| {
+			self.data[i].is_full()
+		}).unwrap_or(self.data.len());
 
-		self.data.iter().take(len).map(Seg::len).sum()
+		self.data.buf.range(..len).map(|seg|
+			seg.len()
+		).sum()
 	}
 
 	/// Swaps internal buffers.

@@ -8,13 +8,14 @@ use std::mem::MaybeUninit;
 use pretty_assertions::{assert_eq, assert_str_eq};
 use orio::{Buffer, BufferResult, DefaultBuffer, SIZE};
 use orio::pool::Pool;
-use orio::streams::{BufSource, Result, Sink, SourceExt, SinkExt, Stream, BufSink};
+use orio::streams::{BufSource, Result, Sink, SourceExt, SinkExt, Stream, BufSink, FileSource};
 use crate::dataset::{Data, DATASET};
+
+const DATA: Data = DATASET.fields_c;
 
 #[test]
 fn read_all() -> Result {
-	const DATA: Data = DATASET.fields_c;
-	let mut source = DATA.buffered();
+	let mut source = FileSource::open(DATA.path)?.buffered();
 	let mut buffer = DefaultBuffer::default();
 	let mut string = String::with_capacity(DATA.size);
 	assert_eq!(source.read_all(&mut buffer)?, DATA.size);
@@ -24,8 +25,7 @@ fn read_all() -> Result {
 
 #[test]
 fn read() -> Result {
-	const DATA: Data = DATASET.fields_c;
-	let mut source = DATA.buffered();
+	let mut source = FileSource::open(DATA.path)?.buffered();
 	let mut string = String::with_capacity(32);
 	assert_eq!(source.skip(1024)?, 1024);
 	assert_str_eq!(source.read_utf8(&mut string, 32)?, &DATA.text[1024..][..32]);
@@ -65,26 +65,24 @@ impl Sink<'_, SIZE> for VecSink {
 
 #[test]
 fn write_all() -> Result {
-	let mut data = DATASET.fields_c;
-	let contents = data.text;
+	let mut file = FileSource::open(DATA.path)?;
 	let mut sink = VecSink::default().buffered();
-	assert_eq!(sink.write_all(&mut data)?, data.size);
+	assert_eq!(sink.write_all(&mut file)?, DATA.size);
 	let string = String::from_utf8(
 		sink.into_inner().vec
 	).unwrap();
-	assert_str_eq!(&string, contents);
+	assert_str_eq!(&string, DATA.text);
 	Ok(())
 }
 
 #[test]
 fn write() -> Result {
-	let mut data = DATASET.fields_c;
-	let contents = data.text;
+	let mut file = FileSource::open(DATA.path)?;
 	let mut sink = VecSink::default().buffered();
-	assert_eq!(sink.write(&mut data, 32)?, 32);
+	assert_eq!(sink.write(&mut file, 32)?, 32);
 	let string = String::from_utf8(
 		sink.into_inner().vec
 	).unwrap();
-	assert_str_eq!(&string, &contents[..32]);
+	assert_str_eq!(&string, &DATA.text[..32]);
 	Ok(())
 }

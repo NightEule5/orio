@@ -50,7 +50,7 @@ arrayvec = { version = "0.7.4", features = ["zeroize"] }
 
 [dev-dependencies]
 bytes = "1.4.0"
-criterion = "0.5.1"
+criterion = { version = "0.5.1", features = ["real_blackbox"] }
 ctor = "0.2.0"
 paste = "1.0.14"
 pretty_assertions = "1.4.0"
@@ -58,6 +58,9 @@ quickcheck = "1.0.3"
 quickcheck_macros = "1.0.0"
 tempfile = "3.9.0"
 
+[[bench]]
+name = "buffer"
+harness = false
 [[bench]]
 name = "segment"
 harness = false

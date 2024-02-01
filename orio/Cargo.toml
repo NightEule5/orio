@@ -64,3 +64,6 @@ harness = false
 [[bench]]
 name = "segment"
 harness = false
+[[bench]]
+name = "file"
+harness = false

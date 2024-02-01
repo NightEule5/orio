@@ -11,7 +11,7 @@ use std::cmp::min;
 use std::ops::{Index, RangeBounds};
 use std::{mem, slice};
 use std::mem::MaybeUninit;
-use all_asserts::assert_gt;
+use all_asserts::assert_ge;
 use block_deque::BlockDeque;
 pub(crate) use block_deque::{buf as alloc_block, Block};
 use buffer::Buf;
@@ -297,7 +297,7 @@ impl<'d, const N: usize> Seg<'d, N> {
 			Self(Buf::Block(block)) => Seg(Buf::Block(block)),
 			Self(Buf::Boxed(boxed)) => Seg(Buf::Boxed(boxed)),
 			Self(Buf::Slice(slice)) => {
-				assert_gt!(slice.len(), N);
+				assert_ge!(slice.len(), N);
 				let mut target = pool.claim_one().unwrap_or_default();
 				assert_eq!(
 					target.write(slice).expect("claimed or allocated segment should be writable"),

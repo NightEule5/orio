@@ -12,6 +12,7 @@ repository = "https://github.com/NightEule5/orio/"
 [features]
 default = ["secure-hash"]
 bytes = ["dep:bytes"]
+simd = ["bytemuck/nightly_portable_simd"]
 shared-pool = []
 hash = ["dep:digest"]
 secure-hash = ["groestl", "sha2", "sha3", "shabal", "whirlpool"]

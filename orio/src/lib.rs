@@ -55,6 +55,7 @@
 	type_alias_impl_trait,
 )]
 #![feature(iter_advance_by)]
+#![cfg_attr(feature = "simd", feature(portable_simd))]
 
 mod buffer;
 mod buffered_wrappers;

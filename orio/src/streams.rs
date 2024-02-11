@@ -20,6 +20,8 @@ pub use crate::buffered_wrappers::{BufferedSink, BufferedSource};
 use crate::error::Context;
 use crate::pattern::Pattern;
 use crate::StreamContext::{Read, Write};
+#[cfg(feature = "simd")]
+use std::simd::{prelude::*, LaneCount, SimdElement, SupportedLaneCount};
 
 /// An "stream closed" error.
 #[derive(Copy, Clone, Debug, Default, thiserror::Error)]
@@ -445,6 +447,30 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 		self.read_pod().map(T::to_le)
 	}
 
+	/// Reads multiple big-endian integers into a [`Simd`] vector.
+	#[cfg(feature = "simd")]
+	fn read_vector<T: bytemuck::Pod + PrimInt + SimdElement, const L: usize>(&mut self) -> Result<Simd<T, L>>
+	where LaneCount<L>: SupportedLaneCount {
+		let mut vec: Simd<T, L> = self.read_pod()?;
+		// Loop compiles away, generating the same code as SimdInt::swap_bytes.
+		for i in vec.as_mut_array() {
+			*i = i.to_be();
+		}
+		Ok(vec)
+	}
+
+	/// Reads multiple little-endian integers into a [`Simd`] vector.
+	#[cfg(feature = "simd")]
+	fn read_vector_le<T: bytemuck::Pod + PrimInt + SimdElement, const L: usize>(&mut self) -> Result<Simd<T, L>>
+	where LaneCount<L>: SupportedLaneCount {
+		let mut vec: Simd<T, L> = self.read_pod()?;
+		// Loop compiles away, generating the same code as SimdInt::swap_bytes.
+		for i in vec.as_mut_array() {
+			*i = i.to_le();
+		}
+		Ok(vec)
+	}
+
 	/// Reads an arbitrary [`Pod`] data type.
 	///
 	/// [`Pod`]: bytemuck::Pod
@@ -717,6 +743,28 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 		self.write_pod(value.to_le())
 	}
 
+	/// Writes a [`Simd`] vector of big-endian integers.
+	#[cfg(feature = "simd")]
+	fn write_vector<T: bytemuck::Pod + PrimInt + SimdElement, const L: usize>(&mut self, mut vector: Simd<T, L>) -> Result
+	where LaneCount<L>: SupportedLaneCount {
+		// Loop compiles away, generating the same code as SimdInt::swap_bytes.
+		for i in vector.as_mut_array() {
+			*i = i.to_be();
+		}
+		self.write_pod(vector)
+	}
+
+	/// Writes a [`Simd`] vector of little-endian integers.
+	#[cfg(feature = "simd")]
+	fn write_vector_le<T: bytemuck::Pod + PrimInt + SimdElement, const L: usize>(&mut self, mut vector: Simd<T, L>) -> Result
+	where LaneCount<L>: SupportedLaneCount {
+		// Loop compiles away, generating the same code as SimdInt::swap_bytes.
+		for i in vector.as_mut_array() {
+			*i = i.to_le();
+		}
+		self.write_pod(vector)
+	}
+
 	/// Writes an arbitrary [`Pod`] data type.
 	///
 	/// [`Pod`]: bytemuck::Pod
@@ -725,6 +773,8 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 		self.write_from_slice(bytemuck::bytes_of(&value))?;
 		Ok(())
 	}
+
+
 
 	/// Writes a UTF-8 string.
 	#[inline]

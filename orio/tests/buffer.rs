@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#![cfg_attr(feature = "simd", feature(portable_simd))]
+
 mod dataset;
 
 macro_rules! qc_assert_ok {
@@ -150,6 +152,41 @@ mod read {
 	}
 
 	gen! { u8, i8, u16, i16, u32, i32, u64, i64, u128, i128, usize, isize }
+
+	#[cfg(feature = "simd")]
+	#[derive(Copy, Clone, Debug)]
+	struct SimdData(std::simd::u16x16);
+
+	#[cfg(feature = "simd")]
+	impl Arbitrary for SimdData {
+		fn arbitrary(g: &mut Gen) -> Self {
+			let mut arr = [0; 16];
+			arr.fill_with(|| u16::arbitrary(g));
+			Self(arr.into())
+		}
+	}
+
+	#[cfg(feature = "simd")]
+	#[quickcheck]
+	fn u16x16(SimdData(data): SimdData) {
+		let mut buffer = DefaultBuffer::default();
+		for &i in data.as_array() {
+			buffer.write_int(i).unwrap();
+		}
+
+		assert_eq!(buffer.read_vector().unwrap(), data);
+	}
+
+	#[cfg(feature = "simd")]
+	#[quickcheck]
+	fn u16x16_le(SimdData(data): SimdData) {
+		let mut buffer = DefaultBuffer::default();
+		for &i in data.as_array() {
+			buffer.write_int_le(i).unwrap();
+		}
+
+		assert_eq!(buffer.read_vector_le().unwrap(), data);
+	}
 
 	#[quickcheck]
 	fn vec(vec: Vec<u8>) {

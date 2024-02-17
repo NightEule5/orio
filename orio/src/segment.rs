@@ -8,7 +8,7 @@ mod util;
 pub(crate) use ring::*;
 
 use std::cmp::min;
-use std::ops::{Index, RangeBounds};
+use std::ops::{Index, IndexMut, RangeBounds};
 use std::{mem, slice};
 use std::mem::MaybeUninit;
 use all_asserts::assert_ge;
@@ -368,6 +368,19 @@ impl<'d, const N: usize> Index<usize> for Seg<'d, N> {
 			&a[index]
 		} else {
 			&b[index]
+		}
+	}
+}
+
+impl<'d, const N: usize> IndexMut<usize> for Seg<'d, N> {
+	fn index_mut(&mut self, index: usize) -> &mut u8 {
+		let (a, b) = self.as_mut_slices().expect(
+			"segment should be exclusive"
+		);
+		if index < a.len() {
+			&mut a[index]
+		} else {
+			&mut b[index]
 		}
 	}
 }

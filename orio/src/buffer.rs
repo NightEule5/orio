@@ -9,8 +9,8 @@ pub use options::*;
 use std::cmp::min;
 use std::{fmt, mem, slice};
 use std::fmt::{Debug, Formatter};
-use std::ops::{Range, RangeBounds};
-use all_asserts::assert_ge;
+use std::ops::{Index, IndexMut, Range, RangeBounds};
+use all_asserts::{assert_ge, assert_le};
 use itertools::Itertools;
 use crate::pool::{DefaultPoolContainer, Pool, pool, PoolExt};
 use crate::{BufferResult as Result, ByteStr, ResultContext, ResultSetContext, Seg, StreamResult};
@@ -335,6 +335,19 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		}
 	}
 
+	/// Grows the buffer by `count` bytes without writing data to it. The elements
+	/// exposed at the end of the buffer are unsafe to read from until initialized.
+	/// This is useful for lower-level modification of buffer contents, such as
+	/// setting by index.
+	///
+	/// # Panics
+	///
+	/// Panics if `count` is greater than the buffer limit.
+	pub unsafe fn grow(&mut self, count: usize) {
+		assert_le!(count, self.limit());
+		self.data.grow(count);
+	}
+
 	fn claim_or_alloc(&mut self, count: usize) {
 		let Self { data, pool, .. } = self;
 		let seg_count = count.div_ceil(N);
@@ -442,14 +455,34 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 	}
 
 	/// Returns the byte at position `pos`, or `None` if `pos` is out of bounds.
-	pub fn get(&self, mut pos: usize) -> Option<u8> {
+	pub fn get(&self, mut pos: usize) -> Option<&u8> {
 		if pos > self.count() { return None }
 
 		for seg in self.data.iter() {
 			if seg.len() < pos {
 				pos -= seg.len();
 			} else {
-				return Some(seg[pos])
+				return Some(&seg[pos])
+			}
+		}
+
+		None
+	}
+
+	/// Returns a mutable reference to the byte at position `pos`, or `None` if
+	/// `pos` is out of bounds.
+	///
+	/// # Panics
+	///
+	/// Panics if the segment containing the position is shared.
+	pub fn get_mut(&mut self, mut pos: usize) -> Option<&mut u8> {
+		if pos > self.count() { return None }
+
+		for seg in self.data.iter_mut() {
+			if seg.len() < pos {
+				pos -= seg.len();
+			} else {
+				return Some(&mut seg[pos])
 			}
 		}
 
@@ -609,4 +642,34 @@ impl<const N: usize, P: Pool<N>, T: AsRef<[u8]>> PartialEq<T> for Buffer<'_, N, 
 	fn eq(&self, other: &T) -> bool {
 		self == other.as_ref()
 	}
+}
+
+impl<const N: usize, P: Pool<N>> Index<usize> for Buffer<'_, N, P> {
+	type Output = u8;
+
+	#[inline]
+	fn index(&self, index: usize) -> &u8 {
+		let Some(byte) = self.get(index) else {
+			index_out_of_bounds(index, self.count())
+		};
+		byte
+	}
+}
+
+impl<const N: usize, P: Pool<N>> IndexMut<usize> for Buffer<'_, N, P> {
+	#[inline]
+	fn index_mut(&mut self, index: usize) -> &mut u8 {
+		let count = self.count();
+		let Some(byte) = self.get_mut(index) else {
+			index_out_of_bounds(index, count)
+		};
+		byte
+	}
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn index_out_of_bounds(index: usize, count: usize) -> ! {
+	panic!("byte index {index} is out of bounds on buffer of byte count {count}")
 }

@@ -191,7 +191,7 @@ impl<'d, S: Source<'d, SIZE>> Read for SourceReader<'d, S> {
 impl<'d, S: BufSource<'d, SIZE>> Read for SourceReader<'d, S> {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		let Self(source, ..) = self;
-		Ok(source.read_slice(buf)?)
+		Ok(source.read_slice(buf)?.len())
 	}
 }
 

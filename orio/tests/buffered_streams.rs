@@ -55,7 +55,7 @@ impl Sink<'_, SIZE> for VecSink {
 			MaybeUninit::slice_assume_init_mut(
 				self.vec.spare_capacity_mut()
 			)
-		})?;
+		})?.len();
 		unsafe {
 			self.vec.set_len(len + count);
 		}

@@ -35,7 +35,7 @@ fn buf_hash_source() {
 
 	let mut read = 0;
 	while !source.is_eos() {
-		read += source.read_slice(&mut buffer).unwrap();
+		read += source.read_slice(&mut buffer).unwrap().len();
 	}
 
 	let src_hash = source.take_hash().hex_lower_string();

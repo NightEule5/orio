@@ -55,7 +55,7 @@ fn read_slice(c: &mut Criterion) {
 	buffer.write_from_slice(DATA).unwrap();
 	let target = &mut [0; DATA.len()][..];
 	c.bench_function("read_slice", |b|
-		read_loop(b, &buffer, |buf| buf.read_slice_exact(target))
+		read_loop(b, &buffer, |buf| buf.read_slice_exact(target).map(<[u8]>::len))
 	);
 }
 

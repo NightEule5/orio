@@ -249,17 +249,16 @@ impl<'d, H: Clone + Default + Digest, S: BufSource<'d, N>, const N: usize> BufSo
 		result.context(Read)
 	}
 
-	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
-		let count = self.source_mut().read_slice(buf)?;
-		let slice = &buf[..count.min(buf.len())];
-		self.hasher.update(slice);
-		Ok(count)
+	fn read_slice<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
+		let slice = self.source_mut().read_slice(buf)?;
+		self.hasher.update(&slice);
+		Ok(slice)
 	}
 
-	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
-		let count = self.source_mut().read_slice_exact(buf)?;
-		self.hasher.update(buf);
-		Ok(count)
+	fn read_slice_exact<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
+		let slice = self.source_mut().read_slice_exact(buf)?;
+		self.hasher.update(&slice);
+		Ok(slice)
 	}
 
 	fn read_utf8<'s>(&mut self, buf: &'s mut String, count: usize) -> Result<&'s str> {

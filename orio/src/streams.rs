@@ -305,23 +305,24 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 		)
 	}
 
-	/// Reads bytes into a slice, returning the number of bytes read.
-	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
+	/// Reads bytes into a slice, returning a slice containing the read bytes.
+	fn read_slice<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
 		let mut read = 0;
-		self.read_count_spec(buf.len(), move |src, _| {
-			read += src.read_slice(&mut buf[read..])?;
+		self.read_count_spec(buf.len(), |src, _| {
+			read += src.read_slice(&mut buf[read..])?.len();
 			Ok::<_, StreamError>(read)
-		})
+		})?;
+		Ok(&mut buf[..read])
 	}
 
-	/// Reads the exact length of bytes into a slice, returning the number of bytes
-	/// read if successful, or an end-of-stream error if the slice could not be filled.
-	/// Bytes are not consumed if an end-of-stream error is returned.
-	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
+	/// Reads the exact length of bytes into a slice, returning the slice if successful,
+	/// or an end-of-stream error if the slice could not be filled. Bytes are not
+	/// consumed if an end-of-stream error is returned.
+	fn read_slice_exact<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
 		self.require(buf.len())?;
-		let read_count = self.buf_mut().read_slice_exact(buf)?;
-		assert_eq!(read_count, buf.len());
-		Ok(read_count)
+		let read = self.buf_mut().read_slice_exact(buf)?;
+		assert_eq!(read.len(), buf.len());
+		Ok(buf)
 	}
 
 	/// Reads an array with a size of `T` bytes.
@@ -863,12 +864,12 @@ impl<'d, const N: usize, S: BufSource<'d, N> + ?Sized> BufSource<'d, N> for &mut
 	}
 
 	#[inline]
-	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
+	fn read_slice<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
 		S::read_slice(self, buf)
 	}
 
 	#[inline]
-	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
+	fn read_slice_exact<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
 		S::read_slice_exact(self, buf)
 	}
 

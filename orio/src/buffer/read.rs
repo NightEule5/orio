@@ -84,7 +84,7 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		Ok(self.count() >= count)
 	}
 
-	fn read_slice(&mut self, buf: &mut [u8]) -> Result<usize> {
+	fn read_slice<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
 		let mut count = 0;
 		let mut empty_len = 0;
 		for seg in self.data.iter_mut() {
@@ -101,14 +101,15 @@ impl<'d, const N: usize, P: Pool<N>> BufSource<'d, N> for Buffer<'d, N, P> {
 		}
 		self.data.consume(count);
 		self.data.rotate_back(empty_len);
-		Ok(count)
+		Ok(&mut buf[..count])
 	}
 
-	fn read_slice_exact(&mut self, buf: &mut [u8]) -> Result<usize> {
-		self.require(buf.len())?;
-		let count = self.read_slice(buf)?;
-		assert_eq!(count, buf.len(), "require should ensure all bytes are available");
-		Ok(count)
+	fn read_slice_exact<'s>(&mut self, buf: &'s mut [u8]) -> Result<&'s [u8]> {
+		let len = buf.len();
+		self.require(len)?;
+		let slice = self.read_slice(buf)?;
+		assert_eq!(slice.len(), len, "require should ensure all bytes are available");
+		Ok(slice)
 	}
 
 	fn read_utf8<'s>(&mut self, buf: &'s mut String, mut count: usize) -> Result<&'s str> {

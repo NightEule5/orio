@@ -11,6 +11,7 @@ use std::mem::MaybeUninit;
 use std::ops::{IndexMut, Range, RangeBounds};
 use std::rc::Rc;
 use all_asserts::assert_le;
+use crate::streams::BufStream;
 
 pub type Block<const N: usize = { super::SIZE }> = Box<[MaybeUninit<u8>; N]>;
 
@@ -146,14 +147,7 @@ impl<const N: usize> BlockDeque<N> {
 	/// Returns a pair of mutable slices which contains the contents of the deque,
 	/// or `None` if the deque is shared.
 	pub fn as_mut_slices(&mut self) -> Option<(&mut [u8], &mut [u8])> {
-		let (a, b) = self.slice_ranges(.., self.len);
-		self.buf().map(|buf| {
-			let (a, b) = split_range_mut(buf, a, b);
-			unsafe {
-				(MaybeUninit::slice_assume_init_mut(a),
-				 MaybeUninit::slice_assume_init_mut(b))
-			}
-		})
+		self.as_mut_slices_in_range(..)
 	}
 
 	/// Returns a pair of slices which contain the contents of the deque within
@@ -164,6 +158,19 @@ impl<const N: usize> BlockDeque<N> {
 			(MaybeUninit::slice_assume_init_ref(&self.buf[a]),
 			 MaybeUninit::slice_assume_init_ref(&self.buf[b]))
 		}
+	}
+
+	/// Returns a pair of mutable slices which contain the contents of the deque
+	/// within `range`, or `None` if the deque is shared.
+	pub fn as_mut_slices_in_range<R: RangeBounds<usize>>(&mut self, range: R) -> Option<(&mut [u8], &mut [u8])> {
+		let (a, b) = self.slice_ranges(range, self.len);
+		self.buf().map(|buf| {
+			let (a, b) = split_range_mut(buf, a, b);
+			unsafe {
+				(MaybeUninit::slice_assume_init_mut(a),
+				 MaybeUninit::slice_assume_init_mut(b))
+			}
+		})
 	}
 
 	/// Clears the deque.

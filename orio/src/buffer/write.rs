@@ -6,7 +6,9 @@ use std::io::{BorrowedBuf, ErrorKind, IoSliceMut, Read};
 use std::iter::FilterMap;
 use std::mem::MaybeUninit;
 use std::ops::RangeTo;
+use num_traits::PrimInt;
 use crate::{Buffer, BufferResult, ResultContext, Seg, StreamResult as Result};
+use crate::buffer::index_out_of_bounds;
 use crate::BufferContext::{Drain, Fill};
 use crate::streams::{BufSink, Sink, Source};
 use crate::pool::Pool;
@@ -80,6 +82,348 @@ impl<'d, const N: usize, P: Pool<N>> BufSink<'d, N> for Buffer<'d, N, P> {
 			"buffer should have writable segments after reserve"
 		);
 		seg.push(value).expect("back segment should be writable");
+		Ok(())
+	}
+}
+
+impl<const N: usize, P: Pool<N>> Buffer<'_, N, P> {
+	/// Writes bytes from a slice at position `pos`, replacing existing bytes.
+	///
+	/// # Panics
+	///
+	/// Panics if any of the segments containing the position are shared, or if
+	/// the position is out of bounds.
+	pub fn write_slice_at(&mut self, mut pos: usize, buf: &[u8]) -> Result<usize> {
+		if pos > self.count() {
+			index_out_of_bounds(pos, self.count())
+		} else if pos == self.count() {
+			return self.write_slice(buf)
+		}
+
+		let count = self.count() - pos;
+		let interior_count = buf.len().min(count);
+		let mut interior = &buf[..interior_count];
+		let exterior = &buf[interior_count..];
+
+		for seg in self.data.iter_mut() {
+			if seg.len() <= pos {
+				pos -= seg.len();
+			} else {
+				let len = buf.len().min(seg.len());
+				seg.copy_from(pos, &interior[..len])
+					.expect("segment should be writable");
+				interior = &interior[len..];
+			}
+		}
+
+		let count = interior.len() + self.write_slice(exterior)?;
+		Ok(count)
+	}
+
+	/// Writes a [`u8`] at position `pos`, replacing the existing value at that
+	/// position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segment containing the position is shared, or if the position
+	/// is out of bounds.
+	pub fn write_u8_at(&mut self, pos: usize, value: u8) -> Result {
+		if pos > self.count() {
+			index_out_of_bounds(pos, self.count())
+		} else if pos == self.count() {
+			self.write_u8(value)
+		} else {
+			self[pos] = value;
+			Ok(())
+		}
+	}
+
+	/// Writes an [`i8`] at position `pos`, replacing the existing value at that
+	/// position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segment containing the position is shared, or if the position
+	/// is out of bounds.
+	#[inline]
+	pub fn write_i8_at(&mut self, pos: usize, value: i8) -> Result {
+		self.write_u8_at(pos, value as u8)
+	}
+
+	/// Writes a big-endian [`u16`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u16_at(&mut self, pos: usize, value: u16) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`u16`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u16_le_at(&mut self, pos: usize, value: u16) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian [`i16`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i16_at(&mut self, pos: usize, value: i16) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`i16`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i16_le_at(&mut self, pos: usize, value: i16) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian [`u32`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u32_at(&mut self, pos: usize, value: u32) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`u32`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u32_le_at(&mut self, pos: usize, value: u32) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian [`i32`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i32_at(&mut self, pos: usize, value: i32) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`i32`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i32_le_at(&mut self, pos: usize, value: i32) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian [`u64`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u64_at(&mut self, pos: usize, value: u64) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`u64`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u64_le_at(&mut self, pos: usize, value: u64) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian [`i64`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i64_at(&mut self, pos: usize, value: i64) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`i64`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i64_le_at(&mut self, pos: usize, value: i64) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian [`usize`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_usize_at(&mut self, pos: usize, value: usize) -> Result {
+		self.write_u64_at(pos, value as u64)
+	}
+
+	/// Writes a little-endian [`usize`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_usize_le_at(&mut self, pos: usize, value: usize) -> Result {
+		self.write_u64_le_at(pos, value as u64)
+	}
+
+	/// Writes a big-endian [`isize`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_isize_at(&mut self, pos: usize, value: isize) -> Result {
+		self.write_i64_at(pos, value as i64)
+	}
+
+	/// Writes a little-endian [`isize`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_isize_le_at(&mut self, pos: usize, value: isize) -> Result {
+		self.write_i64_le_at(pos, value as i64)
+	}
+
+	/// Writes a big-endian [`u128`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u128_at(&mut self, pos: usize, value: u128) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`u128`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_u128_le_at(&mut self, pos: usize, value: u128) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian [`i128`] at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i128_at(&mut self, pos: usize, value: i128) -> Result {
+		self.write_int_at(pos, value)
+	}
+
+	/// Writes a little-endian [`i128`] at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_i128_le_at(&mut self, pos: usize, value: i128) -> Result {
+		self.write_int_le_at(pos, value)
+	}
+
+	/// Writes a big-endian integer at position `pos`, replacing the existing value
+	/// at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_int_at<T: PrimInt + bytemuck::Pod>(&mut self, pos: usize, value: T) -> Result {
+		self.write_pod_at(pos, value.to_be())
+	}
+
+	/// Writes a little-endian integer at position `pos`, replacing the existing
+	/// value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_int_le_at<T: PrimInt + bytemuck::Pod>(&mut self, pos: usize, value: T) -> Result {
+		self.write_pod_at(pos, value.to_le())
+	}
+
+	/// Writes an arbitrary [`Pod`] data type at position `pos`, replacing the
+	/// existing value at that position.
+	///
+	/// # Panics
+	///
+	/// Panics if the segments containing the position are shared, or if the
+	/// position is out of bounds.
+	#[inline]
+	pub fn write_pod_at<T: bytemuck::Pod>(&mut self, pos: usize, value: T) -> Result {
+		self.write_slice_at(pos, bytemuck::bytes_of(&value))?;
 		Ok(())
 	}
 }

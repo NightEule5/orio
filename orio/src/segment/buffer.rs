@@ -76,6 +76,19 @@ impl BoxedBuf {
 		(a, b)
 	}
 
+	pub fn as_mut_slices_in_range<R: RangeBounds<usize>>(&mut self, range: R) -> Option<(&mut [u8], &mut [u8])> {
+		let (mut a, mut b) = self.as_mut_slices()?;
+		let range = slice::range(range, ..self.len);
+		let mut len = range.len();
+
+		a = &mut a[range.start..];
+		a = &mut a[..min(len, a.len())];
+		len -= a.len();
+		b = &mut b[..len];
+
+		Some((a, b))
+	}
+
 	pub fn clear(&mut self) {
 		self.off = 0;
 		self.len = 0;

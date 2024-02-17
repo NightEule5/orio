@@ -8,7 +8,7 @@ mod util;
 pub(crate) use ring::*;
 
 use std::cmp::min;
-use std::ops::{Index, IndexMut, RangeBounds};
+use std::ops::{Index, IndexMut, RangeBounds, RangeFrom};
 use std::{mem, slice};
 use std::mem::MaybeUninit;
 use all_asserts::assert_ge;
@@ -140,6 +140,16 @@ impl<'d, const N: usize> Seg<'d, N> {
 		}
 	}
 
+	/// Returns a pair of mutable slices which contain the segment contents within
+	/// `range`, or `None` if the segment is shared.
+	fn as_mut_slices_in_range(&mut self, range: RangeFrom<usize>) -> Option<(&mut [u8], &mut [u8])> {
+		match &mut self.0 {
+			Buf::Block(block) => block.as_mut_slices_in_range(range),
+			Buf::Boxed(boxed) => boxed.as_mut_slices_in_range(range),
+			_ => None
+		}
+	}
+
 	/// Makes the segment writable if its contents are shared, by allocating a new
 	/// block and copying the shared contents into it. If the data is too large for
 	/// a single block, a segment containing the remaining shared data is returned.
@@ -176,6 +186,18 @@ impl<'d, const N: usize> Seg<'d, N> {
 	/// copied.
 	pub fn copy(&mut self, buf: &mut [u8]) -> usize {
 		buf.copy_from_pair(self.as_slices())
+	}
+
+	/// Copies slice contents into the segment starting from an `offset`, returning
+	/// the slice as an error if the segment is not writable. The lengths of `data`
+	/// and the segment starting from `offset` must match.
+	pub fn copy_from<'s>(&mut self, offset: usize, data: &'s [u8]) -> Result<(), &'s [u8]> {
+		let Some((a, b)) = self.as_mut_slices_in_range(offset..) else {
+			return Err(data)
+		};
+		a.copy_from_slice(&data[..a.len()]);
+		b.copy_from_slice(&data[a.len()..]);
+		Ok(())
 	}
 
 	/// Writes data from `other` into the segment to fill empty space if the segment

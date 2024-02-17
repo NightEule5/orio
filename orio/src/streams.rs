@@ -12,6 +12,7 @@ pub use hashing::*;
 pub use file::*;
 pub use std_io::*;
 
+use std::mem::size_of;
 use std::result;
 use num_traits::PrimInt;
 use crate::pool::{DefaultPoolContainer, Pool};
@@ -446,6 +447,50 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 		self.read_pod().map(T::to_le)
 	}
 
+	/// Reads big-endian integers into a slice, returning a slice containing the
+	/// read integers.
+	#[inline]
+	fn read_int_slice<'s, T: PrimInt + bytemuck::Pod>(&mut self, values: &'s mut [T]) -> Result<&'s [T]> {
+		let count = self.read_pod_slice(values)?.len();
+		for value in &mut values[..count] {
+			*value = value.to_be();
+		}
+		Ok(&values[..count])
+	}
+
+	/// Reads little-endian integers into a slice, returning a slice containing the
+	/// read integers.
+	#[inline]
+	fn read_int_slice_le<'s, T: PrimInt + bytemuck::Pod>(&mut self, values: &'s mut [T]) -> Result<&'s [T]> {
+		let count = self.read_pod_slice(values)?.len();
+		for value in &mut values[..count] {
+			*value = value.to_le();
+		}
+		Ok(&values[..count])
+	}
+
+	/// Reads the exact length of big-endian integers into a slice, returning the
+	/// slice.
+	#[inline]
+	fn read_int_slice_exact<'s, T: PrimInt + bytemuck::Pod>(&mut self, values: &'s mut [T]) -> Result<&'s [T]> {
+		self.read_pod_slice_exact(values)?;
+		for value in values.iter_mut() {
+			*value = value.to_be();
+		}
+		Ok(values)
+	}
+
+	/// Reads the exact length of little-endian integers into a slice, returning
+	/// the slice.
+	#[inline]
+	fn read_int_slice_exact_le<'s, T: PrimInt + bytemuck::Pod>(&mut self, values: &'s mut [T]) -> Result<&'s [T]> {
+		self.read_pod_slice_exact(values)?;
+		for value in values.iter_mut() {
+			*value = value.to_le();
+		}
+		Ok(values)
+	}
+
 	/// Reads an arbitrary [`Pod`] data type.
 	///
 	/// [`Pod`]: bytemuck::Pod
@@ -456,6 +501,32 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 			bytemuck::bytes_of_mut(&mut buf)
 		)?;
 		Ok(buf)
+	}
+
+	/// Reads into a slice of an arbitrary [`Pod`] data type, returning a slice
+	/// containing the read data. If not enough bytes can be read to cleanly fill
+	/// the last element, these remaining bytes are not removed from the stream
+	/// and only filled elements are contained in the resulting slice.
+	///
+	/// [`Pod`]: bytemuck::Pod
+	fn read_pod_slice<'s, T: bytemuck::Pod>(&mut self, mut values: &'s mut [T]) -> Result<&'s [T]> {
+		let size = size_of::<T>();
+		self.request(size * values.len())?;
+		let len = self.available() / size;
+		values = &mut values[..len];
+		let bytes = bytemuck::cast_slice_mut(values);
+		self.read_slice_exact(bytes)?;
+		Ok(values)
+	}
+
+	/// Reads the exact length of elements into a slice of an arbitrary [`Pod`] data
+	/// type, returning the slice.
+	///
+	/// [`Pod`]: bytemuck::Pod
+	fn read_pod_slice_exact<'s, T: bytemuck::Pod>(&mut self, values: &'s mut [T]) -> Result<&'s [T]> {
+		let bytes = bytemuck::cast_slice_mut(values);
+		self.read_slice_exact(bytes)?;
+		Ok(values)
 	}
 
 	/// Reads up to `count` UTF-8 bytes into `buf`, returning a slice of `buf`
@@ -727,10 +798,20 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 		Ok(())
 	}
 
+	/// Writes a slice of an arbitrary [`Pod`] data type, returning the number of
+	/// elements written.
+	///
+	/// [`Pod`]: bytemuck::Pod
+	#[inline]
+	fn write_pod_slice<T: bytemuck::Pod>(&mut self, value: &[T]) -> Result<usize> {
+		let count = self.write_slice(bytemuck::cast_slice(&value))?;
+		Ok(count / size_of::<T>())
+	}
+
 	/// Writes a UTF-8 string.
 	#[inline]
 	fn write_utf8(&mut self, value: &str) -> Result<usize> {
-		self.write_from_slice(value.as_bytes())
+		self.write_slice(value.as_bytes())
 	}
 }
 

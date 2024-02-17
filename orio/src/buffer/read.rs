@@ -49,8 +49,8 @@ impl<'d, const N: usize, P: Pool<N>> Source<'d, N> for Buffer<'d, N, P> {
 				sink.data.push_back(shared);
 			} else {
 				let (a, b) = front.as_slices_in_range(..remaining);
-				sink.write_from_slice(a).context(Fill)?;
-				sink.write_from_slice(b).context(Fill)?;
+				sink.write_slice(a).context(Fill)?;
+				sink.write_slice(b).context(Fill)?;
 			}
 
 			front.consume(remaining);

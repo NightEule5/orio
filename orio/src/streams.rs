@@ -590,10 +590,10 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	fn drain_buffered(&mut self) -> BufferResult;
 
 	/// Writes bytes from a slice, returning the number of bytes written.
-	fn write_from_slice(&mut self, mut buf: &[u8]) -> Result<usize> {
+	fn write_slice(&mut self, mut buf: &[u8]) -> Result<usize> {
 		let mut count = 0;
 		while !buf.is_empty() {
-			let written = self.buf_mut().write_from_slice(buf).context(Write)?;
+			let written = self.buf_mut().write_slice(buf).context(Write)?;
 			buf = &buf[written..];
 			count += written;
 			self.drain_buffered().context(Write)?;
@@ -723,7 +723,7 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	/// [`Pod`]: bytemuck::Pod
 	#[inline]
 	fn write_pod<T: bytemuck::Pod>(&mut self, value: T) -> Result {
-		self.write_from_slice(bytemuck::bytes_of(&value))?;
+		self.write_slice(bytemuck::bytes_of(&value))?;
 		Ok(())
 	}
 
@@ -1056,8 +1056,8 @@ impl<'d, const N: usize, S: BufSink<'d, N> + ?Sized> BufSink<'d, N> for &mut S {
 	}
 
 	#[inline]
-	fn write_from_slice(&mut self, buf: &[u8]) -> Result<usize> {
-		S::write_from_slice(self, buf)
+	fn write_slice(&mut self, buf: &[u8]) -> Result<usize> {
+		S::write_slice(self, buf)
 	}
 
 	#[inline]

@@ -227,7 +227,7 @@ impl<'d, S: Sink<'d, SIZE>> Write for SinkWriter<'d, S> {
 impl<'d, S: BufSink<'d, SIZE>> Write for SinkWriter<'d, S> {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		let Self(sink, ..) = self;
-		Ok(sink.write_from_slice(buf)?)
+		Ok(sink.write_slice(buf)?)
 	}
 
 	fn flush(&mut self) -> io::Result<()> {

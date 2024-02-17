@@ -69,7 +69,7 @@ impl<'d> Source<'d, SIZE> for Data<'d> {
 
 	fn fill(&mut self, sink: &mut Buffer<'d, SIZE, impl Pool<SIZE>>, count: usize) -> BufferResult<usize> {
 		let slice = &self.text[..count.min(self.text.len())];
-		let count = sink.write_from_slice(slice.as_bytes())?;
+		let count = sink.write_slice(slice.as_bytes())?;
 		self.text = &self.text[count..];
 		Ok(count)
 	}

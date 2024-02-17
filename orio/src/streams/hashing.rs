@@ -419,8 +419,8 @@ impl<'d, H: Digest, S: BufSink<'d, N>, const N: usize> BufSink<'d, N> for HashSi
 		Ok(())
 	}
 
-	fn write_from_slice(&mut self, buf: &[u8]) -> Result<usize> {
-		let count = self.sink_mut().write_from_slice(buf)?;
+	fn write_slice(&mut self, buf: &[u8]) -> Result<usize> {
+		let count = self.sink_mut().write_slice(buf)?;
 		let slice = &buf[..count.min(buf.len())];
 		self.hasher.update(slice);
 		Ok(count)

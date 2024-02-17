@@ -10,7 +10,7 @@ const DATA: &[u8] = include_bytes!("../../test-data/cantrbry/fields_c");
 fn write_slice(c: &mut Criterion) {
 	c.bench_function("write_slice", |b| b.iter(|| {
 		let mut buf = DefaultBuffer::default();
-		buf.write_from_slice(DATA).unwrap();
+		buf.write_slice(DATA).unwrap();
 		buf
 	}));
 }
@@ -52,7 +52,7 @@ fn read_loop<R>(b: &mut Bencher, buf: &Buffer, read: impl FnMut(&mut Buffer) -> 
 
 fn read_slice(c: &mut Criterion) {
 	let mut buffer = Buffer::default();
-	buffer.write_from_slice(DATA).unwrap();
+	buffer.write_slice(DATA).unwrap();
 	let target = &mut [0; DATA.len()][..];
 	c.bench_function("read_slice", |b|
 		read_loop(b, &buffer, |buf| buf.read_slice_exact(target).map(<[u8]>::len))
@@ -97,7 +97,7 @@ fn read_numbers(c: &mut Criterion) {
 fn skip(c: &mut Criterion) {
 	let mut group = c.benchmark_group("skip");
 	let mut buffer = Buffer::default();
-	buffer.write_from_slice(DATA).unwrap();
+	buffer.write_slice(DATA).unwrap();
 
 	group.bench_function("skip all", |b|
 		read_loop(b, &buffer, |buf| buf.skip(DATA.len()))
@@ -114,7 +114,7 @@ fn skip(c: &mut Criterion) {
 fn find(c: &mut Criterion) {
 	let mut group = c.benchmark_group("find");
 	let mut buffer = DefaultBuffer::default();
-	buffer.write_from_slice(DATA).unwrap();
+	buffer.write_slice(DATA).unwrap();
 
 	group.bench_function("find byte", |b| b.iter(|| buffer.find(b'<')));
 	group.bench_function("find char", |b| b.iter(|| buffer.find('<')));
@@ -129,7 +129,7 @@ fn find(c: &mut Criterion) {
 fn hash(c: &mut Criterion) {
 	use digest::Digest;
 	let mut buffer = DefaultBuffer::default();
-	buffer.write_from_slice(DATA).unwrap();
+	buffer.write_slice(DATA).unwrap();
 	c.bench_function("hash", |b| b.iter(|| {
 		let mut hasher = sha2::Sha256::default();
 		buffer.hash(black_box(&mut hasher));

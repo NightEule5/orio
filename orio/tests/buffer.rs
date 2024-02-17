@@ -154,7 +154,7 @@ mod read {
 	#[quickcheck]
 	fn vec(vec: Vec<u8>) {
 		let mut buffer = DefaultBuffer::default();
-		buffer.write_from_slice(&vec).unwrap();
+		buffer.write_slice(&vec).unwrap();
 		let mut slice = vec![0; vec.len()];
 		buffer.read_slice_exact(&mut slice).unwrap();
 		assert_eq!(slice, vec);
@@ -384,7 +384,7 @@ mod read {
 	#[quickcheck]
 	fn mixed_vec(vec: Vec<Value>) -> TestResult {
 		let ref mut buffer: DefaultBuffer = BufferOptions::default().always_allocate().into();
-		buffer.write_from_slice(&Value::bytes_of(&vec)).unwrap();
+		buffer.write_slice(&Value::bytes_of(&vec)).unwrap();
 
 		for value in vec {
 			match value.compare_with_read(buffer) {

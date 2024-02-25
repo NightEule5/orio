@@ -5,6 +5,7 @@ mod void;
 mod hashing;
 mod file;
 mod std_io;
+mod bincode;
 
 pub use seeking::*;
 pub use void::*;
@@ -20,6 +21,9 @@ pub use crate::buffered_wrappers::{BufferedSink, BufferedSource};
 use crate::error::Context;
 use crate::pattern::Pattern;
 use crate::StreamContext::{Read, Write};
+pub use bincode::*;
+#[cfg(feature = "bincode")]
+use ::bincode::{Decode, Encode, config::Config, error::{DecodeError, EncodeError}};
 
 /// An "stream closed" error.
 #[derive(Copy, Clone, Debug, Default, thiserror::Error)]
@@ -228,9 +232,9 @@ pub trait BufStream<'d, const N: usize = SIZE>: Stream<N> {
 	type Pool: Pool<N>;
 
 	/// Borrows the stream buffer.
-	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, Self::Pool>;
+	fn buf(&self) -> &Buffer<'d, N, Self::Pool>;
 	/// Borrows the stream buffer mutably.
-	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, Self::Pool>;
+	fn buf_mut(&mut self) -> &mut Buffer<'d, N, Self::Pool>;
 }
 
 /// The result of a buffered *find* operation such as [`read_utf8_line`].
@@ -515,6 +519,16 @@ pub trait BufSource<'d, const N: usize = SIZE>: BufStream<'d, N> + Source<'d, N>
 	fn read_utf8_until_inclusive(&mut self, buf: &mut String, terminator: impl Pattern) -> Result<Utf8Match> {
 		self.buf_mut().read_utf8_until_inclusive(buf, terminator)
 	}
+
+	/// Decodes a value from the source with [Bincode](::bincode).
+	#[cfg(feature = "bincode")]
+	fn read_with_bincode<T: Decode>(
+		&mut self,
+		config: impl Config
+	) -> Result<T, DecodeError> where Self: Sized {
+		let reader = self.as_bincode_reader();
+		::bincode::decode_from_reader(reader, config)
+	}
 }
 
 trait BufSourceSpec<'d, const N: usize>: BufSource<'d, N> {
@@ -731,6 +745,19 @@ pub trait BufSink<'d, const N: usize = SIZE>: BufStream<'d, N> + Sink<'d, N> {
 	fn write_utf8(&mut self, value: &str) -> Result<usize> {
 		self.write_from_slice(value.as_bytes())
 	}
+
+	/// Encodes `value` into the sink with [Bincode](::bincode).
+	#[cfg(feature = "bincode")]
+	fn write_with_bincode<T: Encode>(
+		&mut self,
+		value: T,
+		config: impl Config
+	) -> Result<(), EncodeError> where Self: Sized {
+		let writer = self.as_bincode_writer();
+		::bincode::encode_into_writer(value, writer, config)?;
+		let _ = self.drain_buffered();
+		Ok(())
+	}
 }
 
 trait BufSinkSpec<'d, const N: usize>: BufSink<'d, N> {
@@ -821,12 +848,12 @@ impl<'d, const N: usize, S: BufStream<'d, N> + ?Sized> BufStream<'d, N> for &mut
 	type Pool = S::Pool;
 
 	#[inline]
-	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, Self::Pool> {
+	fn buf(&self) -> &Buffer<'d, N, Self::Pool> {
 		S::buf(self)
 	}
 
 	#[inline]
-	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, Self::Pool> {
+	fn buf_mut(&mut self) -> &mut Buffer<'d, N, Self::Pool> {
 		S::buf_mut(self)
 	}
 }

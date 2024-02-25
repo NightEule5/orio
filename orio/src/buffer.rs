@@ -391,6 +391,18 @@ impl<'d, const N: usize, P: Pool<N>> Buffer<'d, N, P> {
 		self.copy_to(sink, self.count())
 	}
 
+	/// Returns at most `count` bytes of the next slice without consuming data. The
+	/// slice may be smaller than `count` bytes despite the buffer count being greater,
+	/// if the bytes cannot be returned as a contiguous slice.
+	pub fn peek(&self, count: usize) -> &[u8] {
+		if self.data.is_empty() {
+			&[]
+		} else {
+			let (slice, _) = self.data[0].as_slices();
+			&slice[..count.min(slice.len())]
+		}
+	}
+
 	/// Skips up to `count` bytes.
 	pub fn skip(&mut self, count: usize) -> usize {
 		if count == self.count() {
@@ -552,8 +564,8 @@ impl<const N: usize, P: Pool<N>> Stream<N> for Buffer<'_, N, P> {
 impl<'d, const N: usize, P: Pool<N>> BufStream<'d, N> for Buffer<'d, N, P> {
 	type Pool = P;
 
-	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, P> { self }
-	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, P> { self }
+	fn buf(&self) -> &Buffer<'d, N, P> { self }
+	fn buf_mut(&mut self) -> &mut Buffer<'d, N, P> { self }
 }
 
 impl<const N: usize, P: Pool<N>> Seekable for Buffer<'_, N, P> {

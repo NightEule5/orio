@@ -345,8 +345,8 @@ impl<'d, S: Sink<'d, SIZE>, P: Pool<SIZE>> Sink<'d, SIZE> for BufferedSink<'d, S
 impl<'d, S: Sink<'d, SIZE>, P: Pool<SIZE>> BufStream<'d, SIZE> for BufferedSink<'d, S, P> {
 	type Pool = P;
 
-	fn buf<'b>(&'b self) -> &'b Buffer<'d, SIZE, P> { &self.buffer }
-	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, SIZE, P> { &mut self.buffer }
+	fn buf(&self) -> &Buffer<'d, SIZE, P> { &self.buffer }
+	fn buf_mut(&mut self) -> &mut Buffer<'d, SIZE, P> { &mut self.buffer }
 }
 
 impl<'d, S: Sink<'d, SIZE>, P: Pool<SIZE>> BufSink<'d, SIZE> for BufferedSink<'d, S, P> {

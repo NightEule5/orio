@@ -377,11 +377,11 @@ impl<'d, H: Digest, S: BufSink<'d, N>, const N: usize> HashSink<'d, H, S, N> {
 impl<'d, H, S: BufSink<'d, N>, const N: usize> BufStream<'d, N> for HashSink<'d, H, S, N> {
 	type Pool = S::Pool;
 
-	fn buf<'b>(&'b self) -> &'b Buffer<'d, N, Self::Pool> {
+	fn buf(&self) -> &Buffer<'d, N, Self::Pool> {
 		self.sink().buf()
 	}
 
-	fn buf_mut<'b>(&'b mut self) -> &'b mut Buffer<'d, N, Self::Pool> {
+	fn buf_mut(&mut self) -> &mut Buffer<'d, N, Self::Pool> {
 		self.sink_mut().buf_mut()
 	}
 }
